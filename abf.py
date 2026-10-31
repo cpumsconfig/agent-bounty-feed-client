@@ -157,8 +157,24 @@ def money(value):
         return "—"
 
 
-def filter_items(items, min_usd=0.0, source=None):
-    """Keep items whose est_usd is known and >= min_usd, preserving feed order."""
+FRICTION = ("kyc", "stake", "bond", "purchase", "human_only")
+
+
+def parse_requires(value):
+    """'kyc, stake' -> ('kyc', 'stake'). None or '' -> ()."""
+    if not value:
+        return ()
+    return tuple(p.strip().lower() for p in value.split(",") if p.strip())
+
+
+def filter_items(items, min_usd=0.0, source=None, exclude_requires=()):
+    """Keep items whose est_usd is known and >= min_usd, preserving feed order.
+
+    exclude_requires drops any item whose requires[] intersects the list — the same
+    filter the MCP server applies server-side, done here for the endpoints that take
+    no parameters (/earn-now and feed.json are fixed snapshots).
+    """
+    blocked = set(exclude_requires or ())
     kept = []
     for it in items:
         try:
@@ -168,6 +184,8 @@ def filter_items(items, min_usd=0.0, source=None):
         if amount < min_usd:
             continue
         if source and it.get("source") != source:
+            continue
+        if blocked and blocked & set(it.get("requires") or ()):
             continue
         kept.append(it)
     return kept
@@ -312,7 +330,8 @@ def cmd_earn_now(args):
     if status != 200:
         sys.exit("earn-now returned HTTP %s: %s" % (status, body[:200]))
     data = json.loads(body)
-    items = filter_items(data.get("items", []), args.min_usd, args.source)
+    items = filter_items(data.get("items", []), args.min_usd, args.source,
+                         args.exclude_requires)
     if args.limit:
         items = items[:args.limit]
     if emit({"generated_at": data.get("generated_at"),
@@ -366,7 +385,7 @@ def cmd_feed(args):
         sys.exit("feed.json returned HTTP %s" % status)
     data = json.loads(body)
     items = data if isinstance(data, list) else data.get("items", [])
-    items = filter_items(items, 0.0, args.source)
+    items = filter_items(items, 0.0, args.source, args.exclude_requires)
     items = items[:args.top] if args.top else items
     if emit({"count": len(items), "items": items}, args.json):
         return
@@ -415,7 +434,7 @@ def cmd_check(args):
 
 def check_board(args):
     """Triage the whole board: run the check on every GitHub-issue bounty, best first."""
-    items = filter_items(load_feed(), args.min_usd, args.source)
+    items = filter_items(load_feed(), args.min_usd, args.source, args.exclude_requires)
     targets = [(it, parse_issue_url(it.get("url", ""))) for it in items]
     targets = [(it, p) for it, p in targets if p]
     if args.limit:
@@ -455,9 +474,10 @@ def check_board(args):
             print("  -> %s#%d  %s" % (r["repo"], r["issue"], r["why"]))
 
 
-def new_items(seen, items, min_usd=0.0, source=None):
+def new_items(seen, items, min_usd=0.0, source=None, exclude_requires=()):
     """Items that pass the filters and whose id is not in the state map yet."""
-    return [it for it in filter_items(items, min_usd, source) if it.get("id") not in seen]
+    kept = filter_items(items, min_usd, source, exclude_requires)
+    return [it for it in kept if it.get("id") not in seen]
 
 
 def load_state(path):
@@ -491,7 +511,7 @@ def cmd_watch(args):
             time.sleep(args.interval)
             continue
 
-        fresh = new_items(seen, items, args.min_usd, args.source)
+        fresh = new_items(seen, items, args.min_usd, args.source, args.exclude_requires)
         if args.once and first_pass:
             print("[%s] first pass: %d item(s) match, recording state (nothing reported)"
                   % (stamp(), len(fresh)))
@@ -513,7 +533,7 @@ def cmd_watch(args):
                 if it.get("url"):
                     print("            %s" % it["url"])
 
-        for it in filter_items(items, args.min_usd, args.source):
+        for it in filter_items(items, args.min_usd, args.source, args.exclude_requires):
             seen.setdefault(it["id"], {"first_seen": stamp()})
         save_state(args.state, state)
 
@@ -539,13 +559,21 @@ def cmd_selftest(args):
     sys.exit(0 if result.wasSuccessful() else 1)
 
 
+def add_filter_args(p):
+    p.add_argument("--min-usd", type=float, default=0.0)
+    p.add_argument("--source", default=None, help="algora, taskmarket, direct, frantic, ...")
+    p.add_argument("--exclude-requires", default=None,
+                   help="drop items needing any of these, e.g. kyc,stake,bond")
+    p.add_argument("--no-friction", action="store_true",
+                   help="shorthand for --exclude-requires %s" % ",".join(FRICTION))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Minimal Agent Bounty Feed client")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("earn-now", help="free /earn-now endpoint")
-    p.add_argument("--min-usd", type=float, default=0.0)
-    p.add_argument("--source", default=None, help="algora, taskmarket, direct, frantic, ...")
+    add_filter_args(p)
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_earn_now)
@@ -559,24 +587,22 @@ def main():
     p.set_defaults(func=cmd_mcp)
 
     p = sub.add_parser("feed", help="static feed.json")
+    add_filter_args(p)
     p.add_argument("--top", type=int, default=10)
-    p.add_argument("--source", default=None, help="algora, taskmarket, direct, frantic, ...")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_feed)
 
     p = sub.add_parser("check", help="how contested is a GitHub bounty? (needs api.github.com)")
     p.add_argument("target", nargs="?", help="bounty id (frantic:129) or an issue URL")
     p.add_argument("--all", action="store_true", help="triage the whole board, best first")
-    p.add_argument("--min-usd", type=float, default=0.0)
-    p.add_argument("--source", default=None, help="algora, taskmarket, direct, frantic, ...")
+    add_filter_args(p)
     p.add_argument("--limit", type=int, default=10, help="max issues to check with --all")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("watch", help="poll the board, report only new items with a verdict")
     p.add_argument("--interval", type=int, default=300, help="seconds between polls")
-    p.add_argument("--min-usd", type=float, default=0.0)
-    p.add_argument("--source", default=None)
+    add_filter_args(p)
     p.add_argument("--state", default=".abf-watch.json", help="state file (dedupe across runs)")
     p.add_argument("--once", action="store_true", help="single pass, for cron")
     p.set_defaults(func=cmd_watch)
@@ -586,6 +612,10 @@ def main():
     p.set_defaults(func=cmd_selftest)
 
     args = ap.parse_args()
+    if getattr(args, "no_friction", False) and not getattr(args, "exclude_requires", None):
+        args.exclude_requires = ",".join(FRICTION)
+    if hasattr(args, "exclude_requires"):
+        args.exclude_requires = parse_requires(args.exclude_requires)
     try:
         args.func(args)
     except urllib.error.URLError as exc:

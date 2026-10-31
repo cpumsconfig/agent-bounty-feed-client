@@ -188,17 +188,17 @@ class TestCommandJSONOutput(ServerCase):
         return json.loads(buf.getvalue())
 
     def test_earn_now_json_filters(self):
-        out = self.run_json(abf.cmd_earn_now, min_usd=5.0, limit=None, source=None, json=True)
+        out = self.run_json(abf.cmd_earn_now, min_usd=5.0, limit=None, source=None, exclude_requires=(), json=True)
         self.assertEqual(out["count"], 3)
         self.assertEqual(out["items"][0]["id"], "frantic:129")
         self.assertEqual(out["min_usd"], 5.0)
 
     def test_earn_now_json_limit(self):
-        out = self.run_json(abf.cmd_earn_now, min_usd=0.0, limit=2, source=None, json=True)
+        out = self.run_json(abf.cmd_earn_now, min_usd=0.0, limit=2, source=None, exclude_requires=(), json=True)
         self.assertEqual(out["count"], 2)
 
     def test_feed_json(self):
-        out = self.run_json(abf.cmd_feed, top=4, source=None, json=True)
+        out = self.run_json(abf.cmd_feed, top=4, source=None, exclude_requires=(), json=True)
         self.assertEqual(out["count"], 4)
 
     def test_mcp_json(self):
@@ -212,7 +212,7 @@ class TestCommandJSONOutput(ServerCase):
         import argparse
         buf = io.StringIO()
         with redirect_stdout(buf):
-            abf.cmd_earn_now(argparse.Namespace(min_usd=5.0, limit=None, source=None, json=False))
+            abf.cmd_earn_now(argparse.Namespace(min_usd=5.0, limit=None, source=None, exclude_requires=(), json=False))
         self.assertIn("filter: est_usd >= 5", buf.getvalue())
         self.assertIn("3 item(s)", buf.getvalue())
 
@@ -282,6 +282,39 @@ class TestCompetitionCheck(unittest.TestCase):
     def test_rank_handles_unknown_verdict(self):
         rows = [{"verdict": "error", "prs": 0}, {"verdict": "worth a look", "prs": 1}]
         self.assertEqual(abf.rank(rows)[0]["verdict"], "worth a look")
+
+
+class TestRequiresFilter(unittest.TestCase):
+    """exclude_requires mirrors the MCP server-side filter for the static endpoints."""
+
+    ITEMS = [
+        {"id": "a", "est_usd": 5, "requires": ["kyc"]},
+        {"id": "b", "est_usd": 5, "requires": ["wallet_evm"]},
+        {"id": "c", "est_usd": 5, "requires": ["wallet_evm", "public_post"]},
+        {"id": "d", "est_usd": 5},
+    ]
+
+    def test_parse_splits_and_strips(self):
+        self.assertEqual(abf.parse_requires(" kyc, stake ,bond"), ("kyc", "stake", "bond"))
+
+    def test_parse_handles_empty(self):
+        self.assertEqual(abf.parse_requires(None), ())
+        self.assertEqual(abf.parse_requires(""), ())
+
+    def test_drops_items_with_a_blocked_requirement(self):
+        kept = [i["id"] for i in abf.filter_items(self.ITEMS, 0, None, ("kyc",))]
+        self.assertEqual(kept, ["b", "c", "d"])
+
+    def test_drops_on_any_intersection(self):
+        kept = [i["id"] for i in abf.filter_items(self.ITEMS, 0, None, ("public_post",))]
+        self.assertEqual(kept, ["a", "b", "d"])
+
+    def test_keeps_items_without_requires(self):
+        kept = [i["id"] for i in abf.filter_items(self.ITEMS, 0, None, abf.FRICTION)]
+        self.assertEqual(kept, ["b", "c", "d"])
+
+    def test_no_filter_keeps_everything(self):
+        self.assertEqual(len(abf.filter_items(self.ITEMS, 0, None, ())), 4)
 
 
 class TestWatchState(unittest.TestCase):

@@ -21,7 +21,7 @@ Six commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 50 tests, ~1s, no network needed
+python3 abf.py selftest            # 56 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -56,7 +56,15 @@ python3 abf.py earn-now                  # everything
 python3 abf.py earn-now --min-usd 5      # only >= $5
 python3 abf.py earn-now --limit 3        # first 3 rows
 python3 abf.py earn-now --min-usd 5 --json   # for an agent, not a human
+python3 abf.py earn-now --no-friction        # drop kyc / stake / bond / purchase / human_only
 ```
+
+`--no-friction` is the one worth knowing. Half of any board is work you cannot start: KYC,
+a stake, a bond, a purchase, or a human-only listing. It is shorthand for
+`--exclude-requires kyc,stake,bond,purchase,human_only`, and it cuts the current board from
+25 listings to 15. The same filter exists server-side on the MCP `list_bounties` tool — pass
+`exclude_requires` in `--arguments` — but `/earn-now` and `feed.json` take no parameters, so
+this does it client-side for those two.
 
 `--json` works on all three read commands and emits a single object:
 `{"generated_at": ..., "min_usd": 5.0, "count": 3, "items": [...]}`.
@@ -247,14 +255,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 602 lines, 486 of them code. The transport — handshake, conditional session
+`abf.py` is 632 lines, 509 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 50 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 56 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 
