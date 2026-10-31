@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 91 tests, ~1s, no network needed
+python3 abf.py selftest            # 94 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -295,10 +295,10 @@ things that make a listing worthless, in order, and prints what is left:
 ```bash
 $ python3 abf.py reachable
 
-listed     25 items  $50717.6
-reachable  15 items  $264.6   no kyc/stake/bond/purchase/human_only
-alive      11 items  $234.6   minus sources that never pay
-winnable    7 items  $131.6   minus 50+ submission contests
+listed     25 items  $50,717.6
+reachable  15 items  $264.6      -10  kyc 9, purchase 1
+alive      11 items  $234.6      -4  never paid (frantic)
+winnable    7 items  $131.6      -4  crowded (50+ submissions)
 
 dead sources
   frantic     0 paid / 20 rejected
@@ -337,14 +337,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 904 lines, 738 of them code. The transport — handshake, conditional session
+`abf.py` is 929 lines, 758 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 91 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 94 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

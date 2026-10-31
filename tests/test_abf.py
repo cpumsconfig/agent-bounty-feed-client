@@ -570,6 +570,19 @@ class TestReachable(unittest.TestCase):
         self.assertEqual([i["id"] for i in split["winnable"]], ["d"])             # taskmarket crowded
         self.assertEqual(split["dead"], {"frantic"})
 
+    def test_friction_breakdown_counts_tags(self):
+        tags = dict(abf.friction_breakdown(self.FEED))
+        self.assertEqual(tags, {"kyc": 1})
+
+    def test_usd_total_formats_thousands(self):
+        self.assertEqual(abf.usd_total(1234567), "1,234,567")
+        self.assertEqual(abf.usd_total(50717.6), "50,717.6")
+        self.assertEqual(abf.usd_total(15.0), "15")
+
+    def test_money_never_uses_an_exponent(self):
+        self.assertEqual(abf.money(1234567), "$1.2M")
+        self.assertEqual(abf.money(50717.6), "$50717.6")
+
     def test_json_shape(self):
         import argparse
         orig = abf.load_feed

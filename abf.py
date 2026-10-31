@@ -154,10 +154,24 @@ class MCP:
 # ---------------------------------------------------------------- rendering
 
 def money(value):
+    """Compact cell format. Large values get an M suffix rather than %g's exponent."""
     try:
-        return "$%g" % float(value)
+        amount = float(value)
     except (TypeError, ValueError):
         return "—"
+    if amount >= 1000000:
+        return "$%.1fM" % (amount / 1000000.0)
+    return "$%g" % amount
+
+
+def usd_total(value):
+    """Summary format: thousands separators, no exponent, no trailing zeros."""
+    try:
+        amount = round(float(value), 2)
+    except (TypeError, ValueError):
+        return "0"
+    text = "{:,}".format(amount)
+    return text.rstrip("0").rstrip(".") if "." in text else text
 
 
 FRICTION = ("kyc", "stake", "bond", "purchase", "human_only")
@@ -747,6 +761,15 @@ def reachable_split(items):
     }
 
 
+def friction_breakdown(items):
+    """How many items each friction tag is responsible for, most common first."""
+    counts = {}
+    for it in items:
+        for tag in sorted(set(it.get("requires") or ()) & set(FRICTION)):
+            counts[tag] = counts.get(tag, 0) + 1
+    return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
 def total_usd(items):
     return sum(amount_of(it) or 0 for it in items)
 
@@ -768,20 +791,22 @@ def cmd_reachable(args):
         }, True)
         return
 
-    print("listed     %2d items  $%s" % (len(split["listed"]), money(total_usd(split["listed"]))[1:]))
-    print("reachable  %2d items  $%s   no kyc/stake/bond/purchase/human_only"
-          % (len(split["reachable"]), money(total_usd(split["reachable"]))[1:]))
-    print("alive      %2d items  $%s   minus sources that never pay"
-          % (len(split["alive"]), money(total_usd(split["alive"]))[1:]))
-    print("winnable   %2d items  $%s   minus %d+ submission contests"
-          % (len(alive), money(total_usd(alive))[1:], CONTESTED_AT))
+    dropped_friction = [it for it in split["listed"] if it not in split["reachable"]]
+    dropped_dead = [it for it in split["reachable"] if it not in split["alive"]]
+    dropped_crowd = [it for it in split["alive"] if it not in split["winnable"]]
 
-    if split["dead"]:
-        print("")
-        print("dead sources")
-        for source in sorted(split["dead"]):
-            paid, rejected = split["health"][source]
-            print("  %-11s %d paid / %d rejected" % (source, paid, rejected))
+    def row(label, items, note=""):
+        print(("%-10s %2d items  $%-10s %s" % (label, len(items), usd_total(total_usd(items)), note)).rstrip())
+
+    tags = friction_breakdown(dropped_friction)
+    row("listed", split["listed"], "")
+    row("reachable", split["reachable"],
+        "-%d  %s" % (len(dropped_friction),
+                     ", ".join("%s %d" % (t, n) for t, n in tags) or "friction"))
+    row("alive", split["alive"],
+        "-%d  never paid (%s)" % (len(dropped_dead), ", ".join(sorted(split["dead"])) or "none"))
+    row("winnable", split["winnable"],
+        "-%d  crowded (%d+ submissions)" % (len(dropped_crowd), CONTESTED_AT))
 
     print("")
     print_bounties(alive, args.limit)
