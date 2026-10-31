@@ -157,6 +157,8 @@ python3 tests/mock_mcp.py 8765 &
 python3 abf.py mcp --url http://127.0.0.1:8765/mcp
 ```
 
+On Windows, `cmd` has no `&` backgrounding — open a second terminal for the client instead.
+
 If that prints a session id, four tools and a two-row table, the client is correct
 independently of the live service. `fixtures/earn-now.sample.json` is a real captured
 `/earn-now` response, kept so the parser can be exercised offline.
