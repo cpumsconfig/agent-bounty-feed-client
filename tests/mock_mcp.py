@@ -101,7 +101,16 @@ class Handler(BaseHTTPRequestHandler):
             body = sse({"jsonrpc": "2.0", "id": rid, "result": {"tools": TOOLS}})
         elif method == "tools/call":
             name = msg["params"]["name"]
-            payload = {"counts": {"total": 25, "security": 2}} if name == "get_feed_stats" else BOUNTIES
+            if name == "get_feed_stats":
+                payload = {"counts": {"total": 25, "security": 2}}
+            elif name == "get_bounty":
+                payload = {"generated_at": "2026-10-31T00:00:00Z",
+                           "item": BOUNTIES["items"][0], "note": "mock note"}
+            elif name == "get_new_bounties":
+                payload = {"since": msg["params"].get("arguments", {}).get("since"),
+                           "items": BOUNTIES["items"][:1]}
+            else:
+                payload = BOUNTIES
             body = sse({"jsonrpc": "2.0", "id": rid, "result": {
                 "content": [{"type": "text", "text": json.dumps(payload)}],
                 "isError": False,

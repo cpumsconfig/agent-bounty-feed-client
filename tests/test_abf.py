@@ -270,6 +270,27 @@ class TestCompetitionCheck(unittest.TestCase):
             abf.cmd_check(args)
         self.assertIn("needs a bounty id", str(ctx.exception))
 
+    def test_check_board_shows_reward_when_est_usd_missing(self):
+        feed = [{"id": "x", "url": "https://github.com/a/b/issues/1",
+                 "est_usd": None, "reward": 100.0, "currency": "OUSD"}]
+        row = {"repo": "a/b", "issue": 1, "title": "t", "state": "open",
+               "created_at": "2026-10-31", "age_days": 1, "comments": 0, "prs": 0,
+               "merged_last_100": 50, "merged_sample": 100, "merged_count": 50,
+               "verdict": "worth a look", "why": "ok"}
+        import argparse
+        args = argparse.Namespace(all=True, target=None, min_usd=5.0, source=None,
+                                  exclude_requires=(), closes_within=None, json=False, limit=10)
+        orig_feed, orig_check = abf.load_feed, abf.check_issue
+        abf.load_feed = lambda: feed
+        abf.check_issue = lambda o, r, n: dict(row)
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                abf.check_board(args)
+        finally:
+            abf.load_feed, abf.check_issue = orig_feed, orig_check
+        self.assertIn("$100", buf.getvalue())
+
     def test_judge_boundaries(self):
         self.assertEqual(abf.judge(1, 10, 50)[0], "worth a look")   # 10 is not > 10
         self.assertEqual(abf.judge(1, 11, 50)[0], "crowded")
@@ -299,6 +320,46 @@ class TestCompetitionCheck(unittest.TestCase):
     def test_rank_handles_unknown_verdict(self):
         rows = [{"verdict": "error", "prs": 0}, {"verdict": "worth a look", "prs": 1}]
         self.assertEqual(abf.rank(rows)[0]["verdict"], "worth a look")
+
+
+class TestGetAndNew(ServerCase):
+    """cmd_get and cmd_new against the mock: the shapes they parse are the shapes
+    the real server sends (item-wrapped bounty, items list), which is exactly what
+    broke before."""
+
+    def run_capture(self, fn, **kwargs):
+        import argparse
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            fn(argparse.Namespace(**kwargs))
+        return buf.getvalue()
+
+    def test_get_unwraps_the_item(self):
+        out = self.run_capture(abf.cmd_get, id="frantic:129", url=self.url, json=False)
+        self.assertIn("frantic:129", out)
+        self.assertIn("est_usd", out)
+        self.assertIn("mock note", out)
+
+    def test_get_json_is_the_raw_result(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            import argparse
+            abf.cmd_get(argparse.Namespace(id="frantic:129", url=self.url, json=True))
+        payload = json.loads(buf.getvalue())
+        self.assertIn("item", payload)
+
+    def test_new_parses_the_items_list(self):
+        out = self.run_capture(abf.cmd_new, since="24h", url=self.url, min_usd=0.0,
+                               source=None, exclude_requires=(), closes_within=None,
+                               limit=None, json=False)
+        self.assertIn("frantic:129", out)
+        self.assertIn("1 item(s)", out)
+
+    def test_new_applies_min_usd(self):
+        out = self.run_capture(abf.cmd_new, since="24h", url=self.url, min_usd=99.0,
+                               source=None, exclude_requires=(), closes_within=None,
+                               limit=None, json=False)
+        self.assertIn("no items", out)
 
 
 class TestRequiresFilter(unittest.TestCase):

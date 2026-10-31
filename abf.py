@@ -522,7 +522,7 @@ def check_board(args):
                    "title": it.get("title", ""), "state": "?", "created_at": "?",
                    "age_days": 0, "comments": 0, "prs": 0, "merged_last_100": 0,
                    "verdict": "error", "why": str(exc)[:90]}
-        row["usd"] = it.get("est_usd")
+        row["usd"] = amount_of(it)
         results.append(row)
 
     results = rank(results)
