@@ -86,17 +86,17 @@ repo       90 of the last 100 closed PRs merged (90 per 100)
 verdict    CROWDED — 98 PRs already compete
            you would be entry 99; skip it</code></pre>
 
-<p>And across the whole board at once:</p>
-<pre><code>$ python3 abf.py check --all --min-usd 5
+<p>Or triage a whole source at once, best first:</p>
+<pre><code>$ python3 abf.py check --all --source algora --min-usd 5
 
-REPO#ISSUE                       USD    PRs  MERGED  VERDICT      TITLE
-----------------------------------------------------------------------------
-dailydollar-bot/agent-bounty      $5      1       0  STALLED      5 USDC bounty: best public…
-arakoodev/EdgeChains#273         $30    116      32  CROWDED      BOUNTY: add support for qdrant…
-onyx-dot-app/onyx#2281          $250     98      90  CROWDED      Jira Service Management Connector
-highlight/highlight#8032         $20     73      25  CROWDED      document sveltekit backend…
+REPO#ISSUE                             USD    PRs  MERGED  VERDICT      TITLE
+----------------------------------------------------------------------------------------------------------------
+lablab-ai/community-content#462        $60     14      90  CROWDED      Crafting a Comprehensive Tutorial 
+arakoodev/EdgeChains#290               $50     95      32  CROWDED      BOUNTY: integrate AWS Comprehend a
+onyx-dot-app/onyx#2281                $250     98      90  CROWDED      Jira Service Management Connector
+arakoodev/EdgeChains#273               $30    116      32  CROWDED      BOUNTY: add support for qdrant vec
 
-8 checked, 0 worth a look</code></pre>
+4 checked, 0 worth a look</code></pre>
 
 <p class="muted">Three numbers decide it: PRs already open, merges out of the last hundred closed PRs, and how old the issue is. More than ten PRs is crowded. Fewer than five merges means the repo has stalled and the reward may never move. Older than a week means the field is already in.</p>
 
