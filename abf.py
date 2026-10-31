@@ -233,6 +233,11 @@ def cmd_mcp(args):
         info.get("protocolVersion", "?"), client.session_id or "(none)"))
     print("tools (%d): %s\n" % (len(tools), ", ".join(t["name"] for t in tools)))
 
+    schema = next((t.get("inputSchema") or {} for t in tools if t["name"] == args.tool), {})
+    required = schema.get("required") or []
+    if required:
+        print("%s requires: %s\n" % (args.tool, ", ".join(required)))
+
     if isinstance(result, str):
         print(result)
         return

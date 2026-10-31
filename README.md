@@ -110,8 +110,23 @@ That `requires_counts` block is the useful part: 15 of 25 listings need an EVM w
 9 need KYC, and 15 need no bond, stake or KYC at all. Filter on it before you spend time
 on a listing.
 
-The server exposes four tools: `list_bounties`, `get_new_bounties`, `get_bounty`,
-`get_feed_stats`.
+The server exposes four tools. Two take no arguments, two do — and the client prints the
+required ones before it calls, so you are not guessing:
+
+| Tool | Arguments | What it returns |
+|---|---|---|
+| `list_bounties` | none (optional `limit`) | every open bounty |
+| `get_feed_stats` | none | counts, totals, `requires_counts` |
+| `get_new_bounties` | `since` (ISO-8601) | only what appeared after that time |
+| `get_bounty` | `id` | one bounty, with its trust fields |
+
+```bash
+python3 abf.py mcp --tool get_new_bounties --arguments '{"since":"2026-10-30T00:00:00Z"}'
+python3 abf.py mcp --tool get_bounty --arguments '{"id":"frantic:129"}'
+```
+
+Call `get_new_bounties` with no arguments and the client prints
+`get_new_bounties requires: since` instead of leaving you with a server error.
 
 ### 3. `feed` — the static snapshot
 
