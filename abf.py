@@ -15,6 +15,7 @@ no venv, no version conflicts.
 
 import argparse
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -153,6 +154,27 @@ def money(value):
         return "—"
 
 
+def filter_items(items, min_usd=0.0):
+    """Keep items whose est_usd is known and >= min_usd, preserving feed order."""
+    kept = []
+    for it in items:
+        try:
+            amount = float(it.get("est_usd") or 0)
+        except (TypeError, ValueError):
+            continue
+        if amount >= min_usd:
+            kept.append(it)
+    return kept
+
+
+def emit(payload, as_json):
+    """One output shape for machines, one for humans."""
+    if as_json:
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return True
+    return False
+
+
 def print_bounties(items, limit=None):
     if limit:
         items = items[:limit]
@@ -178,26 +200,39 @@ def cmd_earn_now(args):
     if status != 200:
         sys.exit("earn-now returned HTTP %s: %s" % (status, body[:200]))
     data = json.loads(body)
-    items = [i for i in data.get("items", [])
-             if float(i.get("est_usd") or 0) >= args.min_usd]
+    items = filter_items(data.get("items", []), args.min_usd)
+    if args.limit:
+        items = items[:args.limit]
+    if emit({"generated_at": data.get("generated_at"),
+             "feed_age_minutes": data.get("feed_age_minutes"),
+             "min_usd": args.min_usd,
+             "count": len(items),
+             "items": items}, args.json):
+        return
     print("feed generated at %s (%s min old), filter: est_usd >= %g\n"
           % (data.get("generated_at", "?"), data.get("feed_age_minutes", "?"),
              args.min_usd))
-    print_bounties(items, args.limit)
+    print_bounties(items)
 
 
 def cmd_mcp(args):
     client = MCP(args.url)
     info = client.initialize()
     server = info.get("serverInfo", {})
+    tools = client.list_tools()
+    result = client.call_tool(args.tool, json.loads(args.arguments))
+
+    if args.json:
+        emit({"server": server, "protocol": info.get("protocolVersion"),
+              "session": client.session_id, "tools": [t["name"] for t in tools],
+              "result": result}, True)
+        return
+
     print("connected: %s %s | protocol %s | session %s\n" % (
         server.get("name", "?"), server.get("version", "?"),
         info.get("protocolVersion", "?"), client.session_id or "(none)"))
-
-    tools = client.list_tools()
     print("tools (%d): %s\n" % (len(tools), ", ".join(t["name"] for t in tools)))
 
-    result = client.call_tool(args.tool, json.loads(args.arguments))
     if isinstance(result, str):
         print(result)
         return
@@ -214,7 +249,23 @@ def cmd_feed(args):
         sys.exit("feed.json returned HTTP %s" % status)
     data = json.loads(body)
     items = data if isinstance(data, list) else data.get("items", [])
-    print_bounties(items, args.top)
+    items = items[:args.top] if args.top else items
+    if emit({"count": len(items), "items": items}, args.json):
+        return
+    print_bounties(items)
+
+
+def cmd_selftest(args):
+    """Run the offline test suite: mock server + client, no network needed."""
+    import unittest
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    suite = unittest.defaultTestLoader.discover(
+        os.path.join(here, "tests"), pattern="test_*.py")
+    result = unittest.TextTestRunner(verbosity=2 if args.verbose else 1).run(suite)
+    sys.exit(0 if result.wasSuccessful() else 1)
 
 
 def main():
@@ -224,6 +275,7 @@ def main():
     p = sub.add_parser("earn-now", help="free /earn-now endpoint")
     p.add_argument("--min-usd", type=float, default=0.0)
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_earn_now)
 
     p = sub.add_parser("mcp", help="MCP server over Streamable HTTP")
@@ -231,11 +283,17 @@ def main():
     p.add_argument("--tool", default="list_bounties")
     p.add_argument("--arguments", default="{}", help="JSON object, e.g. '{\"limit\":5}'")
     p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_mcp)
 
     p = sub.add_parser("feed", help="static feed.json")
     p.add_argument("--top", type=int, default=10)
+    p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_feed)
+
+    p = sub.add_parser("selftest", help="run the offline test suite (no network)")
+    p.add_argument("-v", "--verbose", action="store_true")
+    p.set_defaults(func=cmd_selftest)
 
     args = ap.parse_args()
     try:

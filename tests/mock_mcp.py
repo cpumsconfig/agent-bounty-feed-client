@@ -10,10 +10,13 @@ the Mcp-Session-Id echo, the 202 notification, and both response framings
 """
 
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 SESSION = "mock-session-0001"
+FIXTURE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                       "fixtures", "earn-now.sample.json")
 
 TOOLS = [
     {"name": "list_bounties", "description": "List open bounties",
@@ -43,6 +46,21 @@ def sse(obj):
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
+
+    def do_GET(self):
+        """Serve the captured /earn-now response so the read paths test offline."""
+        if self.path.split("?")[0] not in ("/earn-now", "/feed.json"):
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        with open(FIXTURE, encoding="utf-8") as fh:
+            body = fh.read().encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
