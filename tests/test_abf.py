@@ -217,6 +217,48 @@ class TestCommandJSONOutput(ServerCase):
         self.assertIn("3 item(s)", buf.getvalue())
 
 
+class TestCompetitionCheck(unittest.TestCase):
+    """parse_issue_url and judge are pure, so they test without any network."""
+
+    def test_parses_issue_url(self):
+        self.assertEqual(abf.parse_issue_url("https://github.com/onyx-dot-app/onyx/issues/2281"),
+                         ("onyx-dot-app", "onyx", 2281))
+
+    def test_parses_url_with_trailing_slash_and_query(self):
+        self.assertEqual(abf.parse_issue_url("https://github.com/a/b/issues/7/?x=1"), ("a", "b", 7))
+
+    def test_rejects_pull_urls(self):
+        self.assertIsNone(abf.parse_issue_url("https://github.com/a/b/pull/7"))
+
+    def test_rejects_non_numeric(self):
+        self.assertIsNone(abf.parse_issue_url("https://github.com/a/b/issues/abc"))
+
+    def test_rejects_plain_text(self):
+        self.assertIsNone(abf.parse_issue_url("frantic:129"))
+
+    def test_judge_crowded(self):
+        verdict, _ = abf.judge(age_days=3, prs=98, merged=90)
+        self.assertEqual(verdict, "crowded")
+
+    def test_judge_stalled(self):
+        verdict, _ = abf.judge(age_days=3, prs=2, merged=0)
+        self.assertEqual(verdict, "stalled")
+
+    def test_judge_late(self):
+        verdict, _ = abf.judge(age_days=30, prs=2, merged=50)
+        self.assertEqual(verdict, "late")
+
+    def test_judge_worth_a_look(self):
+        verdict, why = abf.judge(age_days=1, prs=0, merged=40)
+        self.assertEqual(verdict, "worth a look")
+        self.assertIn("0 PRs", why)
+
+    def test_judge_boundaries(self):
+        self.assertEqual(abf.judge(1, 10, 50)[0], "worth a look")   # 10 is not > 10
+        self.assertEqual(abf.judge(1, 11, 50)[0], "crowded")
+        self.assertEqual(abf.judge(1, 0, 5)[0], "worth a look")     # 5 is not < 5
+
+
 class TestFixtureShape(unittest.TestCase):
     """fixtures/earn-now.sample.json is a real captured response."""
 

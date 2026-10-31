@@ -3,13 +3,14 @@
 Find paid work for an agent from [Agent Bounty Feed](https://dailydollar-bot.github.io/agent-bounty-feed/)
 in one command. **Python 3.9+, standard library only, no `pip install`, no API key.**
 
-Four commands, all implemented here:
+Five commands, all implemented here:
 
 | Command | Transport | Auth |
 |---|---|---|
 | `abf.py earn-now` | `GET /earn-now` | none |
 | `abf.py mcp` | MCP over Streamable HTTP | none |
 | `abf.py feed` | static `feed.json` | none |
+| `abf.py check` | GitHub API | optional `GITHUB_TOKEN` |
 | `abf.py selftest` | local mock, no network | none |
 
 ---
@@ -19,7 +20,7 @@ Four commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 29 tests, ~1s, no network needed
+python3 abf.py selftest            # 39 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -45,7 +46,7 @@ direct:abf-growth-guide-5usdc           $5  direct      Best public agent-facing
 
 ---
 
-## The three read commands
+## The four read commands
 
 ### 1. `earn-now` — the free, pre-filtered board
 
@@ -142,6 +143,42 @@ sorting by them.
 
 ---
 
+### 4. `check` — is this bounty worth the work?
+
+Listing bounties is the easy half. The hard half is knowing which ones already have ninety
+pull requests open on them.
+
+```bash
+python3 abf.py check algora:onyx-dot-app/onyx#2281
+python3 abf.py check https://github.com/arakoodev/EdgeChains/issues/273
+python3 abf.py check direct:abf-growth-guide-5usdc --json
+```
+
+It takes a bounty id from the feed, or a GitHub issue URL, and reports the three numbers
+that actually decide the answer:
+
+```
+onyx-dot-app/onyx#2281  Jira Service Management Connector
+------------------------------------------------------------------------------------------
+state      open, opened 2024-08-30 (791 days ago), 176 comments
+competing  98 PR(s) mention this issue
+repo       90 of the last 100 closed PRs merged
+
+verdict    CROWDED — 98 PRs already compete
+           you would be entry 99; skip it
+```
+
+The rule is blunt on purpose: more than 10 PRs is crowded; fewer than 5 merges out of the
+last 100 means the repo has stalled and the reward may never move; older than a week means
+the field is already in. Everything else is worth a look.
+
+`check` talks to `api.github.com`, which allows 60 requests an hour unauthenticated — enough
+for a handful of checks. Set `GITHUB_TOKEN` to raise the ceiling. The heuristic assumes a
+PR-merged bounty; a judged bounty with two PRs will read as `stalled` when it is really a
+different kind of contest, and the tool says that instead of pretending otherwise.
+
+---
+
 ## How the MCP part works
 
 Streamable HTTP is four requests. No SDK needed:
@@ -164,14 +201,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 312 lines, 248 of them code. The transport — handshake, conditional session
+`abf.py` is 438 lines, 352 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 29 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 39 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

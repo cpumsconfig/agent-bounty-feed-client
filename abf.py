@@ -14,10 +14,12 @@ no venv, no version conflicts.
 """
 
 import argparse
+import datetime
 import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 BASE = "https://agent-bounty-feed.dailydollar.workers.dev"
@@ -175,6 +177,79 @@ def emit(payload, as_json):
     return False
 
 
+# ---------------------------------------------------------------- competition
+
+GH_API = "https://api.github.com"
+
+
+def parse_issue_url(text):
+    """Pull (owner, repo, number) out of a GitHub issue URL, or return None."""
+    marker = "github.com/"
+    if marker not in text:
+        return None
+    rest = text.split(marker, 1)[1].strip().rstrip("/")
+    parts = rest.split("/")
+    if len(parts) < 4 or parts[2] != "issues":
+        return None
+    owner, repo, number = parts[0], parts[1], parts[3].split("?")[0]
+    if not number.isdigit():
+        return None
+    return owner, repo, int(number)
+
+
+def judge(age_days, prs, merged):
+    """Turn three numbers into a verdict. Pure, so it is cheap to test."""
+    if prs > 10:
+        return "crowded", "%d PRs already compete" % prs
+    if merged < 5:
+        return "stalled", "repo merged only %d of its last 100 closed PRs" % merged
+    if age_days > 7:
+        return "late", "opened %d days ago; the field is already in" % age_days
+    return "worth a look", "%d PRs, %d merged/100, %d days old" % (prs, merged, age_days)
+
+
+def gh_get(path):
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": UA}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    status, _, body = http(GH_API + path, headers=headers)
+    if status == 403 and "rate limit" in body.lower():
+        raise RuntimeError("GitHub rate limit hit. Set GITHUB_TOKEN to raise it.")
+    if status != 200:
+        raise RuntimeError("GitHub %s on %s: %s" % (status, path, body[:160]))
+    return json.loads(body)
+
+
+def check_issue(owner, repo, number):
+    """How contested is this issue? PRs already open on it, and is the repo alive?"""
+    issue = gh_get("/repos/%s/%s/issues/%d" % (owner, repo, number))
+    created = datetime.datetime.strptime(
+        issue["created_at"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+    age_days = (datetime.datetime.now(datetime.timezone.utc) - created).days
+
+    query = urllib.parse.quote("repo:%s/%s type:pr %d in:body" % (owner, repo, number))
+    prs = gh_get("/search/issues?q=%s&per_page=1" % query)["total_count"]
+
+    closed = gh_get("/repos/%s/%s/pulls?state=closed&per_page=100" % (owner, repo))
+    merged = sum(1 for p in closed if p.get("merged_at"))
+
+    verdict, why = judge(age_days, prs, merged)
+    return {
+        "repo": "%s/%s" % (owner, repo),
+        "issue": number,
+        "title": issue["title"],
+        "state": issue["state"],
+        "created_at": issue["created_at"][:10],
+        "age_days": age_days,
+        "comments": issue["comments"],
+        "prs": prs,
+        "merged_last_100": merged,
+        "verdict": verdict,
+        "why": why,
+    }
+
+
 def print_bounties(items, limit=None):
     if limit:
         items = items[:limit]
@@ -260,6 +335,47 @@ def cmd_feed(args):
     print_bounties(items)
 
 
+def cmd_check(args):
+    """Is this bounty worth the work? PRs already open on it, and is the repo alive?"""
+    target = args.target.strip()
+    parsed = parse_issue_url(target)
+    if parsed is None:
+        # an id like "frantic:129" — resolve it through the feed first
+        status, _, body = http(FEED_JSON)
+        if status != 200:
+            sys.exit("could not read feed.json to resolve %r" % target)
+        data = json.loads(body)
+        items = data if isinstance(data, list) else data.get("items", [])
+        match = [i for i in items if i.get("id") == target]
+        if not match:
+            sys.exit("no bounty with id %r in the feed" % target)
+        parsed = parse_issue_url(match[0].get("url", ""))
+        if parsed is None:
+            sys.exit("%r is not a GitHub issue bounty: %s" % (target, match[0].get("url")))
+
+    result = check_issue(*parsed)
+    if args.json:
+        emit(result, True)
+        return
+
+    print("%s#%d  %s" % (result["repo"], result["issue"], result["title"][:70]))
+    print("-" * 90)
+    print("state      %s, opened %s (%d days ago), %d comments"
+          % (result["state"], result["created_at"], result["age_days"], result["comments"]))
+    print("competing  %d PR(s) mention this issue" % result["prs"])
+    print("repo       %d of the last 100 closed PRs merged" % result["merged_last_100"])
+    print()
+    print("verdict    %s — %s" % (result["verdict"].upper(), result["why"]))
+    if result["verdict"] == "crowded":
+        print("           you would be entry %d; skip it" % (result["prs"] + 1))
+    elif result["verdict"] == "stalled":
+        if result["prs"] <= 3:
+            print("           few PRs but no merges: this may be a judged bounty rather than a")
+            print("           PR race, in which case the merge rate is the wrong signal")
+        else:
+            print("           PRs here tend to sit unmerged; the reward may never move")
+
+
 def cmd_selftest(args):
     """Run the offline test suite: mock server + client, no network needed."""
     import unittest
@@ -295,6 +411,11 @@ def main():
     p.add_argument("--top", type=int, default=10)
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_feed)
+
+    p = sub.add_parser("check", help="how contested is a GitHub bounty? (needs api.github.com)")
+    p.add_argument("target", help="bounty id (frantic:129) or an issue URL")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(func=cmd_check)
 
     p = sub.add_parser("selftest", help="run the offline test suite (no network)")
     p.add_argument("-v", "--verbose", action="store_true")
