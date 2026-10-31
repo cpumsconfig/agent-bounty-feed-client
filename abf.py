@@ -156,7 +156,7 @@ def money(value):
         return "—"
 
 
-def filter_items(items, min_usd=0.0):
+def filter_items(items, min_usd=0.0, source=None):
     """Keep items whose est_usd is known and >= min_usd, preserving feed order."""
     kept = []
     for it in items:
@@ -164,8 +164,11 @@ def filter_items(items, min_usd=0.0):
             amount = float(it.get("est_usd") or 0)
         except (TypeError, ValueError):
             continue
-        if amount >= min_usd:
-            kept.append(it)
+        if amount < min_usd:
+            continue
+        if source and it.get("source") != source:
+            continue
+        kept.append(it)
     return kept
 
 
@@ -221,6 +224,38 @@ def gh_get(path):
     return json.loads(body)
 
 
+VERDICT_RANK = {"worth a look": 0, "late": 1, "stalled": 2, "crowded": 3, "error": 4}
+
+
+def rank(results):
+    """Best first: an unclaimed bounty beats a stalled repo beats a crowded one."""
+    return sorted(results, key=lambda r: (VERDICT_RANK.get(r["verdict"], 9), r.get("prs", 0)))
+
+
+def load_feed():
+    status, _, body = http(FEED_JSON)
+    if status != 200:
+        sys.exit("feed.json returned HTTP %s" % status)
+    data = json.loads(body)
+    return data if isinstance(data, list) else data.get("items", [])
+
+
+def merged_rate(owner, repo):
+    """Merged PRs per 100 closed ones. Falls back to a smaller page on huge repos."""
+    last = None
+    for size in (100, 30, 10):
+        try:
+            closed = gh_get("/repos/%s/%s/pulls?state=closed&per_page=%d" % (owner, repo, size))
+        except Exception as exc:      # IncompleteRead on multi-MB responses, timeouts, 5xx
+            last = exc
+            continue
+        if not closed:
+            return 0, 0, 0
+        merged = sum(1 for p in closed if p.get("merged_at"))
+        return merged, len(closed), round(merged * 100.0 / len(closed))
+    raise RuntimeError("could not read closed PRs: %s" % str(last)[:80])
+
+
 def check_issue(owner, repo, number):
     """How contested is this issue? PRs already open on it, and is the repo alive?"""
     issue = gh_get("/repos/%s/%s/issues/%d" % (owner, repo, number))
@@ -231,10 +266,9 @@ def check_issue(owner, repo, number):
     query = urllib.parse.quote("repo:%s/%s type:pr %d in:body" % (owner, repo, number))
     prs = gh_get("/search/issues?q=%s&per_page=1" % query)["total_count"]
 
-    closed = gh_get("/repos/%s/%s/pulls?state=closed&per_page=100" % (owner, repo))
-    merged = sum(1 for p in closed if p.get("merged_at"))
+    merged, sample, per_hundred = merged_rate(owner, repo)
 
-    verdict, why = judge(age_days, prs, merged)
+    verdict, why = judge(age_days, prs, per_hundred)
     return {
         "repo": "%s/%s" % (owner, repo),
         "issue": number,
@@ -244,7 +278,9 @@ def check_issue(owner, repo, number):
         "age_days": age_days,
         "comments": issue["comments"],
         "prs": prs,
-        "merged_last_100": merged,
+        "merged_last_100": per_hundred,
+        "merged_sample": sample,
+        "merged_count": merged,
         "verdict": verdict,
         "why": why,
     }
@@ -275,7 +311,7 @@ def cmd_earn_now(args):
     if status != 200:
         sys.exit("earn-now returned HTTP %s: %s" % (status, body[:200]))
     data = json.loads(body)
-    items = filter_items(data.get("items", []), args.min_usd)
+    items = filter_items(data.get("items", []), args.min_usd, args.source)
     if args.limit:
         items = items[:args.limit]
     if emit({"generated_at": data.get("generated_at"),
@@ -329,6 +365,7 @@ def cmd_feed(args):
         sys.exit("feed.json returned HTTP %s" % status)
     data = json.loads(body)
     items = data if isinstance(data, list) else data.get("items", [])
+    items = filter_items(items, 0.0, args.source)
     items = items[:args.top] if args.top else items
     if emit({"count": len(items), "items": items}, args.json):
         return
@@ -337,16 +374,14 @@ def cmd_feed(args):
 
 def cmd_check(args):
     """Is this bounty worth the work? PRs already open on it, and is the repo alive?"""
+    if args.all:
+        return check_board(args)
+
     target = args.target.strip()
     parsed = parse_issue_url(target)
     if parsed is None:
         # an id like "frantic:129" — resolve it through the feed first
-        status, _, body = http(FEED_JSON)
-        if status != 200:
-            sys.exit("could not read feed.json to resolve %r" % target)
-        data = json.loads(body)
-        items = data if isinstance(data, list) else data.get("items", [])
-        match = [i for i in items if i.get("id") == target]
+        match = [i for i in load_feed() if i.get("id") == target]
         if not match:
             sys.exit("no bounty with id %r in the feed" % target)
         parsed = parse_issue_url(match[0].get("url", ""))
@@ -363,7 +398,8 @@ def cmd_check(args):
     print("state      %s, opened %s (%d days ago), %d comments"
           % (result["state"], result["created_at"], result["age_days"], result["comments"]))
     print("competing  %d PR(s) mention this issue" % result["prs"])
-    print("repo       %d of the last 100 closed PRs merged" % result["merged_last_100"])
+    print("repo       %d of the last %d closed PRs merged (%d per 100)"
+          % (result["merged_count"], result["merged_sample"], result["merged_last_100"]))
     print()
     print("verdict    %s — %s" % (result["verdict"].upper(), result["why"]))
     if result["verdict"] == "crowded":
@@ -374,6 +410,48 @@ def cmd_check(args):
             print("           PR race, in which case the merge rate is the wrong signal")
         else:
             print("           PRs here tend to sit unmerged; the reward may never move")
+
+
+def check_board(args):
+    """Triage the whole board: run the check on every GitHub-issue bounty, best first."""
+    items = filter_items(load_feed(), args.min_usd, args.source)
+    targets = [(it, parse_issue_url(it.get("url", ""))) for it in items]
+    targets = [(it, p) for it, p in targets if p]
+    if args.limit:
+        targets = targets[:args.limit]
+    if not targets:
+        sys.exit("no GitHub-issue bounties matched (--min-usd %g, --source %s)"
+                 % (args.min_usd, args.source or "any"))
+
+    results = []
+    for it, parsed in targets:
+        try:
+            row = check_issue(*parsed)
+        except Exception as exc:      # one dead repo must not kill the sweep
+            row = {"repo": "%s/%s" % (parsed[0], parsed[1]), "issue": parsed[2],
+                   "title": it.get("title", ""), "state": "?", "created_at": "?",
+                   "age_days": 0, "comments": 0, "prs": 0, "merged_last_100": 0,
+                   "verdict": "error", "why": str(exc)[:90]}
+        row["usd"] = it.get("est_usd")
+        results.append(row)
+
+    results = rank(results)
+    if args.json:
+        emit(results, True)
+        return
+
+    print("%-34s %7s %6s %7s  %-12s %s" % ("REPO#ISSUE", "USD", "PRs", "MERGED", "VERDICT", "TITLE"))
+    print("-" * 112)
+    for r in results:
+        print("%-34s %7s %6d %7d  %-12s %s" % (
+            ("%s#%d" % (r["repo"], r["issue"]))[:34], money(r.get("usd")), r["prs"],
+            r["merged_last_100"], r["verdict"].upper(), r["title"][:34]))
+
+    open_now = [r for r in results if r["verdict"] == "worth a look"]
+    print("\n%d checked, %d worth a look" % (len(results), len(open_now)))
+    if open_now:
+        for r in open_now:
+            print("  -> %s#%d  %s" % (r["repo"], r["issue"], r["why"]))
 
 
 def cmd_selftest(args):
@@ -395,6 +473,7 @@ def main():
 
     p = sub.add_parser("earn-now", help="free /earn-now endpoint")
     p.add_argument("--min-usd", type=float, default=0.0)
+    p.add_argument("--source", default=None, help="algora, taskmarket, direct, frantic, ...")
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_earn_now)
@@ -409,11 +488,16 @@ def main():
 
     p = sub.add_parser("feed", help="static feed.json")
     p.add_argument("--top", type=int, default=10)
+    p.add_argument("--source", default=None, help="algora, taskmarket, direct, frantic, ...")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_feed)
 
     p = sub.add_parser("check", help="how contested is a GitHub bounty? (needs api.github.com)")
-    p.add_argument("target", help="bounty id (frantic:129) or an issue URL")
+    p.add_argument("target", nargs="?", help="bounty id (frantic:129) or an issue URL")
+    p.add_argument("--all", action="store_true", help="triage the whole board, best first")
+    p.add_argument("--min-usd", type=float, default=0.0)
+    p.add_argument("--source", default=None, help="algora, taskmarket, direct, frantic, ...")
+    p.add_argument("--limit", type=int, default=10, help="max issues to check with --all")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_check)
 

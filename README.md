@@ -20,7 +20,7 @@ Five commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 39 tests, ~1s, no network needed
+python3 abf.py selftest            # 44 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -154,6 +154,28 @@ python3 abf.py check https://github.com/arakoodev/EdgeChains/issues/273
 python3 abf.py check direct:abf-growth-guide-5usdc --json
 ```
 
+Point it at the whole board instead of one bounty and it triages everything, best first:
+
+```bash
+python3 abf.py check --all --min-usd 5
+python3 abf.py check --all --source algora --limit 5
+```
+
+```
+REPO#ISSUE                       USD    PRs  MERGED  VERDICT      TITLE
+--------------------------------------------------------------------------------------------------------------
+dailydollar-bot/agent-bounty      $5      1       0  STALLED      5 USDC bounty: best public agent-facing
+arakoodev/EdgeChains#273         $30    116      32  CROWDED      BOUNTY: add support for qdrant vector da
+onyx-dot-app/onyx#2281          $250     98      90  CROWDED      Jira Service Management Connector
+highlight/highlight#8032         $20     73      25  CROWDED      document sveltekit backend instrumentati
+
+8 checked, 0 worth a look
+```
+
+`--all` costs three API calls per issue, so it is slow by nature — roughly two minutes for
+eight bounties. It survives individual failures: a repo that 404s or times out is reported
+as `ERROR` instead of killing the sweep.
+
 It takes a bounty id from the feed, or a GitHub issue URL, and reports the three numbers
 that actually decide the answer:
 
@@ -201,14 +223,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 438 lines, 352 of them code. The transport — handshake, conditional session
+`abf.py` is 522 lines, 421 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 39 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 44 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

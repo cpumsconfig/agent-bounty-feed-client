@@ -188,17 +188,17 @@ class TestCommandJSONOutput(ServerCase):
         return json.loads(buf.getvalue())
 
     def test_earn_now_json_filters(self):
-        out = self.run_json(abf.cmd_earn_now, min_usd=5.0, limit=None, json=True)
+        out = self.run_json(abf.cmd_earn_now, min_usd=5.0, limit=None, source=None, json=True)
         self.assertEqual(out["count"], 3)
         self.assertEqual(out["items"][0]["id"], "frantic:129")
         self.assertEqual(out["min_usd"], 5.0)
 
     def test_earn_now_json_limit(self):
-        out = self.run_json(abf.cmd_earn_now, min_usd=0.0, limit=2, json=True)
+        out = self.run_json(abf.cmd_earn_now, min_usd=0.0, limit=2, source=None, json=True)
         self.assertEqual(out["count"], 2)
 
     def test_feed_json(self):
-        out = self.run_json(abf.cmd_feed, top=4, json=True)
+        out = self.run_json(abf.cmd_feed, top=4, source=None, json=True)
         self.assertEqual(out["count"], 4)
 
     def test_mcp_json(self):
@@ -212,7 +212,7 @@ class TestCommandJSONOutput(ServerCase):
         import argparse
         buf = io.StringIO()
         with redirect_stdout(buf):
-            abf.cmd_earn_now(argparse.Namespace(min_usd=5.0, limit=None, json=False))
+            abf.cmd_earn_now(argparse.Namespace(min_usd=5.0, limit=None, source=None, json=False))
         self.assertIn("filter: est_usd >= 5", buf.getvalue())
         self.assertIn("3 item(s)", buf.getvalue())
 
@@ -257,6 +257,31 @@ class TestCompetitionCheck(unittest.TestCase):
         self.assertEqual(abf.judge(1, 10, 50)[0], "worth a look")   # 10 is not > 10
         self.assertEqual(abf.judge(1, 11, 50)[0], "crowded")
         self.assertEqual(abf.judge(1, 0, 5)[0], "worth a look")     # 5 is not < 5
+
+
+    def test_filter_by_source(self):
+        items = [{"est_usd": 5, "source": "algora"}, {"est_usd": 5, "source": "direct"},
+                 {"est_usd": 5, "source": "algora"}]
+        self.assertEqual(len(abf.filter_items(items, 0, "algora")), 2)
+        self.assertEqual(len(abf.filter_items(items, 0, "nope")), 0)
+
+    def test_filter_by_source_and_amount(self):
+        items = [{"est_usd": 5, "source": "a"}, {"est_usd": 1, "source": "a"}]
+        self.assertEqual(len(abf.filter_items(items, 2, "a")), 1)
+
+    def test_rank_puts_worth_a_look_first(self):
+        rows = [{"verdict": "crowded", "prs": 98}, {"verdict": "worth a look", "prs": 0},
+                {"verdict": "stalled", "prs": 2}, {"verdict": "late", "prs": 5}]
+        order = [r["verdict"] for r in abf.rank(rows)]
+        self.assertEqual(order, ["worth a look", "late", "stalled", "crowded"])
+
+    def test_rank_breaks_ties_by_fewest_prs(self):
+        rows = [{"verdict": "crowded", "prs": 98}, {"verdict": "crowded", "prs": 12}]
+        self.assertEqual([r["prs"] for r in abf.rank(rows)], [12, 98])
+
+    def test_rank_handles_unknown_verdict(self):
+        rows = [{"verdict": "error", "prs": 0}, {"verdict": "worth a look", "prs": 1}]
+        self.assertEqual(abf.rank(rows)[0]["verdict"], "worth a look")
 
 
 class TestFixtureShape(unittest.TestCase):
