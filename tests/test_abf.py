@@ -284,6 +284,39 @@ class TestCompetitionCheck(unittest.TestCase):
         self.assertEqual(abf.rank(rows)[0]["verdict"], "worth a look")
 
 
+class TestWatchState(unittest.TestCase):
+    """The dedupe layer: what counts as new, and does the state survive a restart."""
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "state.json")
+
+    def test_everything_is_new_on_first_pass(self):
+        items = [{"id": "a", "est_usd": 5}, {"id": "b", "est_usd": 1}]
+        self.assertEqual([i["id"] for i in abf.new_items({}, items, 2)], ["a"])
+
+    def test_seen_items_are_skipped(self):
+        items = [{"id": "a", "est_usd": 5}, {"id": "b", "est_usd": 5}]
+        self.assertEqual([i["id"] for i in abf.new_items({"a": {}}, items, 0)], ["b"])
+
+    def test_state_roundtrip(self):
+        abf.save_state(self.path, {"seen": {"x": {"first_seen": "10:00:00"}}})
+        self.assertEqual(abf.load_state(self.path)["seen"]["x"]["first_seen"], "10:00:00")
+
+    def test_missing_state_file_is_empty(self):
+        self.assertEqual(abf.load_state(os.path.join(self.dir, "nope.json")), {})
+
+    def test_corrupt_state_file_is_empty(self):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self.assertEqual(abf.load_state(self.path), {})
+
+    def test_save_leaves_no_tmp_file(self):
+        abf.save_state(self.path, {"seen": {}})
+        self.assertEqual([f for f in os.listdir(self.dir) if f.endswith(".tmp")], [])
+
+
 class TestFixtureShape(unittest.TestCase):
     """fixtures/earn-now.sample.json is a real captured response."""
 

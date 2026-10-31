@@ -18,6 +18,7 @@ import datetime
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -454,6 +455,77 @@ def check_board(args):
             print("  -> %s#%d  %s" % (r["repo"], r["issue"], r["why"]))
 
 
+def new_items(seen, items, min_usd=0.0, source=None):
+    """Items that pass the filters and whose id is not in the state map yet."""
+    return [it for it in filter_items(items, min_usd, source) if it.get("id") not in seen]
+
+
+def load_state(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(path, state):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def cmd_watch(args):
+    """Poll the board and report only what is new, with a verdict attached."""
+    state = load_state(args.state)
+    seen = state.setdefault("seen", {})
+    first_pass = not seen
+
+    while True:
+        try:
+            items = load_feed()
+        except (SystemExit, RuntimeError) as exc:
+            print("[%s] feed error: %s" % (stamp(), exc))
+            if args.once:
+                return
+            time.sleep(args.interval)
+            continue
+
+        fresh = new_items(seen, items, args.min_usd, args.source)
+        if args.once and first_pass:
+            print("[%s] first pass: %d item(s) match, recording state (nothing reported)"
+                  % (stamp(), len(fresh)))
+        else:
+            for it in fresh:
+                verdict, why = "unchecked", ""
+                parsed = parse_issue_url(it.get("url", ""))
+                if parsed:
+                    try:
+                        row = check_issue(*parsed)
+                        verdict, why = row["verdict"], row["why"]
+                    except Exception as exc:
+                        verdict, why = "error", str(exc)[:70]
+                print("[%s] NEW  %-8s %-12s %s" % (
+                    stamp(), money(it.get("est_usd")), verdict.upper(),
+                    (it.get("title") or "")[:60]))
+                if why:
+                    print("            %s" % why)
+                if it.get("url"):
+                    print("            %s" % it["url"])
+
+        for it in filter_items(items, args.min_usd, args.source):
+            seen.setdefault(it["id"], {"first_seen": stamp()})
+        save_state(args.state, state)
+
+        if args.once:
+            return
+        time.sleep(args.interval)
+
+
+def stamp():
+    return datetime.datetime.now().strftime("%H:%M:%S")
+
+
 def cmd_selftest(args):
     """Run the offline test suite: mock server + client, no network needed."""
     import unittest
@@ -500,6 +572,14 @@ def main():
     p.add_argument("--limit", type=int, default=10, help="max issues to check with --all")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser("watch", help="poll the board, report only new items with a verdict")
+    p.add_argument("--interval", type=int, default=300, help="seconds between polls")
+    p.add_argument("--min-usd", type=float, default=0.0)
+    p.add_argument("--source", default=None)
+    p.add_argument("--state", default=".abf-watch.json", help="state file (dedupe across runs)")
+    p.add_argument("--once", action="store_true", help="single pass, for cron")
+    p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("selftest", help="run the offline test suite (no network)")
     p.add_argument("-v", "--verbose", action="store_true")

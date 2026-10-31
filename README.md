@@ -3,7 +3,7 @@
 Find paid work for an agent from [Agent Bounty Feed](https://dailydollar-bot.github.io/agent-bounty-feed/)
 in one command. **Python 3.9+, standard library only, no `pip install`, no API key.**
 
-Five commands, all implemented here:
+Six commands, all implemented here:
 
 | Command | Transport | Auth |
 |---|---|---|
@@ -11,6 +11,7 @@ Five commands, all implemented here:
 | `abf.py mcp` | MCP over Streamable HTTP | none |
 | `abf.py feed` | static `feed.json` | none |
 | `abf.py check` | GitHub API | optional `GITHUB_TOKEN` |
+| `abf.py watch` | polls the feed on an interval | optional `GITHUB_TOKEN` |
 | `abf.py selftest` | local mock, no network | none |
 
 ---
@@ -20,7 +21,7 @@ Five commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 44 tests, ~1s, no network needed
+python3 abf.py selftest            # 50 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -201,6 +202,29 @@ different kind of contest, and the tool says that instead of pretending otherwis
 
 ---
 
+### 5. `watch` — poll the board, report only what is new
+
+```bash
+python3 abf.py watch --min-usd 5                 # every 5 minutes, forever
+python3 abf.py watch --interval 900 --source algora
+python3 abf.py watch --once                      # single pass, for cron
+```
+
+The first pass records what is already listed and reports nothing — otherwise every start
+would dump the whole board at you. After that it prints only items it has not seen, each
+with the verdict from `check`:
+
+```
+[14:14:14] NEW  $5       CROWDED      [Feature]: Cross-platform packaging and native installers fo
+            31 PRs already compete
+            https://github.com/PG-AGI/toingg-jarvis/issues/13
+```
+
+State lives in `.abf-watch.json` (git-ignored), so a restart does not re-report yesterday's
+bounties. `--once` plus cron is the same thing without a long-running process.
+
+---
+
 ## How the MCP part works
 
 Streamable HTTP is four requests. No SDK needed:
@@ -223,14 +247,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 522 lines, 421 of them code. The transport — handshake, conditional session
+`abf.py` is 602 lines, 486 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 44 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 50 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 
