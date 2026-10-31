@@ -17,6 +17,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -677,6 +678,117 @@ def cmd_mcp_config(args):
         print("Paste this into the MCP config of your host and restart it.")
 
 
+PAID_RE = re.compile(r"([0-9]+) paid / ([0-9]+) rejected", re.I)
+SUBS_RE = re.compile(r"([0-9]+) submissions", re.I)
+DEAD_REJECTIONS = 10
+CONTESTED_AT = 50
+
+
+def payout_stats(eligibility):
+    """'0 paid / 22 rejected' -> (0, 22). None when the prose carries no numbers.
+
+    The feed only states a source's payout history as prose inside eligibility, so
+    a client cannot sort on it without parsing. This is that parse.
+    """
+    match = PAID_RE.search(eligibility or "")
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def source_health(items):
+    """First paid/rejected claim seen per source. Sources with no claim are absent."""
+    health = {}
+    for it in items:
+        source = it.get("source")
+        if source in health:
+            continue
+        stats = payout_stats(it.get("eligibility"))
+        if stats:
+            health[source] = stats
+    return health
+
+
+def is_dead(stats):
+    """A source that has never paid and rejects a lot is a filter, not a slow start."""
+    if not stats:
+        return False
+    paid, rejected = stats
+    return paid == 0 and rejected > DEAD_REJECTIONS
+
+
+def submission_count(item):
+    """'120 submissions so far' -> 120. None when the field says nothing."""
+    match = SUBS_RE.search(item.get("eligibility") or "")
+    return int(match.group(1)) if match else None
+
+
+def is_contested(item):
+    """A bounty with 200 entries already in is reachable in theory and lost in practice."""
+    count = submission_count(item)
+    return count is not None and count >= CONTESTED_AT
+
+
+def reachable_split(items):
+    """Three numbers: everything listed, what needs no human, what survives a dead source."""
+    listed = [it for it in items if amount_of(it) is not None]
+    reachable = filter_items(items, 0.0, None, FRICTION)
+    health = source_health(items)
+    dead = {s for s, st in health.items() if is_dead(st)}
+    alive = [it for it in reachable if it.get("source") not in dead]
+    winnable = [it for it in alive if not is_contested(it)]
+    return {
+        "listed": listed,
+        "reachable": reachable,
+        "alive": alive,
+        "winnable": winnable,
+        "health": health,
+        "dead": dead,
+    }
+
+
+def total_usd(items):
+    return sum(amount_of(it) or 0 for it in items)
+
+
+def cmd_reachable(args):
+    """What is actually reachable: no KYC, no stake, no dead sources."""
+    items = load_feed()
+    split = reachable_split(items)
+    alive = sorted(split["winnable"], key=lambda it: -(amount_of(it) or 0))
+
+    if args.json:
+        emit({
+            "listed": {"count": len(split["listed"]), "usd": total_usd(split["listed"])},
+            "reachable": {"count": len(split["reachable"]), "usd": total_usd(split["reachable"])},
+            "alive": {"count": len(split["alive"]), "usd": total_usd(split["alive"])},
+            "winnable": {"count": len(alive), "usd": total_usd(alive)},
+            "dead_sources": sorted(split["dead"]),
+            "items": alive,
+        }, True)
+        return
+
+    print("listed     %2d items  $%s" % (len(split["listed"]), money(total_usd(split["listed"]))[1:]))
+    print("reachable  %2d items  $%s   no kyc/stake/bond/purchase/human_only"
+          % (len(split["reachable"]), money(total_usd(split["reachable"]))[1:]))
+    print("alive      %2d items  $%s   minus sources that never pay"
+          % (len(split["alive"]), money(total_usd(split["alive"]))[1:]))
+    print("winnable   %2d items  $%s   minus %d+ submission contests"
+          % (len(alive), money(total_usd(alive))[1:], CONTESTED_AT))
+
+    if split["dead"]:
+        print("")
+        print("dead sources")
+        for source in sorted(split["dead"]):
+            paid, rejected = split["health"][source]
+            print("  %-11s %d paid / %d rejected" % (source, paid, rejected))
+
+    print("")
+    print_bounties(alive, args.limit)
+    print("contest filtering uses the feed's own \"N submissions\" figure; a source")
+    print("that does not report one stays in, so treat the last line as an upper bound")
+
+
 def cmd_selftest(args):
     """Run the offline test suite: mock server + client, no network needed."""
     import unittest
@@ -746,6 +858,11 @@ def main():
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_new)
+
+    p = sub.add_parser("reachable", help="what is actually reachable after friction and dead sources")
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_reachable)
 
     p = sub.add_parser("mcp-config", help="print a paste-ready MCP server config")
     p.add_argument("--quiet", action="store_true", help="JSON only, no trailing hint")

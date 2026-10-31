@@ -526,6 +526,66 @@ class TestClosesWithinFilter(unittest.TestCase):
         self.assertEqual(len(abf.filter_items(items, 0, None, (), closes_within=None)), 1)
 
 
+class TestReachable(unittest.TestCase):
+    """The honest number: listed, reachable without a human, alive, winnable."""
+
+    FEED = [
+        {"id": "a", "est_usd": 10, "source": "algora", "requires": ["github", "kyc"],
+         "eligibility": "Stripe payout"},
+        {"id": "b", "est_usd": 20, "source": "frantic", "requires": ["wallet_evm"],
+         "eligibility": "Paid in USDC. So far 0 paid / 22 rejected."},
+        {"id": "c", "est_usd": 30, "source": "taskmarket", "requires": ["wallet_evm"],
+         "eligibility": "mode=bounty; 120 submissions so far"},
+        {"id": "d", "est_usd": 40, "source": "direct", "requires": ["wallet_evm"],
+         "eligibility": "Single winner."},
+    ]
+
+    def test_payout_stats_parses_prose(self):
+        self.assertEqual(abf.payout_stats("So far 0 paid / 22 rejected."), (0, 22))
+
+    def test_payout_stats_absent(self):
+        self.assertIsNone(abf.payout_stats("Stripe payout"))
+        self.assertIsNone(abf.payout_stats(None))
+
+    def test_is_dead_boundary(self):
+        self.assertFalse(abf.is_dead((0, 10)))
+        self.assertTrue(abf.is_dead((0, 11)))
+        self.assertFalse(abf.is_dead((1, 500)))
+        self.assertFalse(abf.is_dead(None))
+
+    def test_submission_count(self):
+        self.assertEqual(abf.submission_count({"eligibility": "120 submissions so far"}), 120)
+        self.assertIsNone(abf.submission_count({"eligibility": "Single winner."}))
+
+    def test_is_contested_boundary(self):
+        self.assertFalse(abf.is_contested({"eligibility": "49 submissions"}))
+        self.assertTrue(abf.is_contested({"eligibility": "50 submissions"}))
+        self.assertFalse(abf.is_contested({"eligibility": "no numbers"}))
+
+    def test_split_drops_each_tier(self):
+        split = abf.reachable_split(self.FEED)
+        self.assertEqual(len(split["listed"]), 4)
+        self.assertEqual([i["id"] for i in split["reachable"]], ["b", "c", "d"])   # a needs kyc
+        self.assertEqual([i["id"] for i in split["alive"]], ["c", "d"])           # frantic is dead
+        self.assertEqual([i["id"] for i in split["winnable"]], ["d"])             # taskmarket crowded
+        self.assertEqual(split["dead"], {"frantic"})
+
+    def test_json_shape(self):
+        import argparse
+        orig = abf.load_feed
+        abf.load_feed = lambda: self.FEED
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                abf.cmd_reachable(argparse.Namespace(limit=None, json=True))
+        finally:
+            abf.load_feed = orig
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["listed"]["usd"], 100.0)
+        self.assertEqual(payload["winnable"]["usd"], 40.0)
+        self.assertEqual(payload["dead_sources"], ["frantic"])
+
+
 class TestWatchLoop(unittest.TestCase):
     """The first pass must be silent with or without --once, and the loop must
     remember that it already had one."""

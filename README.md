@@ -5,7 +5,7 @@ in one command. **Python 3.9+, standard library only, no `pip install`, no API k
 
 > Rendered version of this page: **https://cpumsconfig.github.io/agent-bounty-feed-client/**
 
-Nine commands, all implemented here:
+Ten commands, all implemented here:
 
 | Command | Transport | Auth |
 |---|---|---|
@@ -15,6 +15,7 @@ Nine commands, all implemented here:
 | `abf.py get` | MCP `get_bounty` | none |
 | `abf.py new` | MCP `get_new_bounties` | none |
 | `abf.py check` | GitHub API | optional `GITHUB_TOKEN` |
+| `abf.py reachable` | static `feed.json` | none |
 | `abf.py mcp-config` | none (prints a config) | none |
 | `abf.py watch` | polls the feed on an interval | optional `GITHUB_TOKEN` |
 | `abf.py selftest` | local mock, no network | none |
@@ -26,7 +27,7 @@ Nine commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 84 tests, ~1s, no network needed
+python3 abf.py selftest            # 91 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -286,6 +287,34 @@ no wrapper process.
 
 ---
 
+### 8. `reachable` — the honest number
+
+A board can say $50,000 and contain $5 you can actually claim. `reachable` subtracts the three
+things that make a listing worthless, in order, and prints what is left:
+
+```bash
+$ python3 abf.py reachable
+
+listed     25 items  $50717.6
+reachable  15 items  $264.6   no kyc/stake/bond/purchase/human_only
+alive      11 items  $234.6   minus sources that never pay
+winnable    7 items  $131.6   minus 50+ submission contests
+
+dead sources
+  frantic     0 paid / 20 rejected
+```
+
+Each tier comes from a field the feed already carries:
+
+| Tier | Rule |
+|---|---|
+| reachable | drops any item whose `requires` names a friction requirement |
+| alive | drops sources whose `eligibility` reports `0 paid / N rejected` with N > 10 |
+| winnable | drops items whose `eligibility` reports 50+ `submissions` |
+
+The third tier is an upper bound, not a promise: a source that does not report its submission
+count stays in, and the tool says so on its last line. `--json` returns all four counts.
+
 ## How the MCP part works
 
 Streamable HTTP is four requests. No SDK needed:
@@ -308,14 +337,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 785 lines, 643 of them code. The transport — handshake, conditional session
+`abf.py` is 904 lines, 738 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 84 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 91 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 
