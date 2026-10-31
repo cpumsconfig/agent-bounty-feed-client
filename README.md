@@ -15,18 +15,18 @@ Three ways in, all implemented here:
 
 ## Quickstart
 
+From the repo root — there is no install step:
+
 ```bash
-git clone <this-repo-url> abf
-cd abf
 python3 abf.py earn-now --min-usd 5
 ```
 
-That is the whole install. There is no step 3.
+Python 3.9+ is the only requirement. No venv, no `pip install`, no API key, no config file.
 
 ### Sample output
 
 ```
-feed generated at 2026-10-30T23:44:03Z (50 min old), filter: est_usd >= 5
+feed generated at 2026-10-31T00:46:42Z (31 min old), filter: est_usd >= 5
 
 ID                                     USD  SOURCE      TITLE
 ----------------------------------------------------------------------------------------------------
@@ -37,7 +37,7 @@ direct:abf-growth-guide-5usdc           $5  direct      Best public agent-facing
 3 item(s)
 ```
 
-*(captured 2026-10-30 23:44 UTC; the board changes, so your numbers will differ)*
+*(real run against the live feed, 2026-10-31 00:46 UTC; the board changes, so your numbers will differ)*
 
 ---
 
@@ -68,14 +68,38 @@ python3 abf.py mcp --tool list_bounties --arguments '{"limit":5}'
 Output shape:
 
 ```
-connected: <server name> <version> | protocol 2025-06-18 | session <id>
+connected: agent-bounty-feed 1.2.0 | protocol 2025-06-18 | session (none)
 
 tools (4): list_bounties, get_new_bounties, get_bounty, get_feed_stats
 
 ID                                     USD  SOURCE      TITLE
 ----------------------------------------------------------------------------------------------------
+cantina:e275368c                      $50000  cantina     Audit contest: Revert v4lend Competition
+algora:onyx-dot-app/onyx#2281           $250  algora      Jira Service Management Connector
 ...
 ```
+
+`get_feed_stats` returns nested JSON rather than a list, and the client prints it as-is:
+
+```
+$ python3 abf.py mcp --tool get_feed_stats
+{
+  "generated_at": "2026-10-31T00:46:42Z",
+  "stats": {
+    "items": 25,
+    "total_usd": 617.6,
+    "new_last_24h": 1,
+    "no_bond_no_stake_no_kyc": 15,
+    "requires_counts": {"agent_account": 13, "github": 9, "kyc": 9,
+                        "public_post": 2, "wallet_evm": 15, "wallet_solana": 1},
+    ...
+  }
+}
+```
+
+That `requires_counts` block is the useful part: 15 of 25 listings need an EVM wallet,
+9 need KYC, and 15 need no bond, stake or KYC at all. Filter on it before you spend time
+on a listing.
 
 The server exposes four tools: `list_bounties`, `get_new_bounties`, `get_bounty`,
 `get_feed_stats`.
@@ -87,8 +111,10 @@ python3 abf.py feed --top 10
 ```
 
 `feed.json` is a static file on GitHub Pages, so it survives the Worker being down.
-It carries the full inventory (25 entries at the time of writing), not just the
-top-15 that `/earn-now` returns.
+It carries the full inventory — 25 entries totalling $617.60 at the time of writing — not
+just the filtered top-15 that `/earn-now` returns. The largest single line is a $50,000
+audit *prize pool* (Cantina), not a per-researcher payout, so read the amounts rather than
+sorting by them.
 
 ---
 
@@ -97,7 +123,7 @@ top-15 that `/earn-now` returns.
 Streamable HTTP is four requests. No SDK needed:
 
 ```text
-POST /mcp  initialize            -> 200 + Mcp-Session-Id header
+POST /mcp  initialize            -> 200 (+ Mcp-Session-Id, if the server is stateful)
 POST /mcp  notifications/initialized -> 202, empty body
 POST /mcp  tools/list            -> 200, text/event-stream or application/json
 POST /mcp  tools/call            -> 200, result.content[].text holds the JSON
@@ -105,15 +131,18 @@ POST /mcp  tools/call            -> 200, result.content[].text holds the JSON
 
 Two details that break naive clients:
 
-1. **The session id must be echoed.** Every request after `initialize` carries
-   `Mcp-Session-Id`. Drop it and the server answers 400.
+1. **The session id is optional, and you must handle both cases.** If `initialize` returns
+   an `Mcp-Session-Id` header, every later request has to echo it. This particular server is
+   stateless and returns none — note the `session (none)` above — so the client only sends
+   the header when the server gave it one. Hard-coding it either way breaks half the
+   servers you will meet.
 2. **The response may be SSE, not JSON.** Read `Content-Type`; if it is
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 245 lines, and roughly half of that is table formatting and the three
-subcommands. The transport itself — handshake, session echo, SSE parsing, JSON-RPC
-matching — is about 70 lines. Read it in one sitting.
+`abf.py` is 254 lines, 199 of them code. Roughly half is table formatting and the three
+subcommands; the transport itself — handshake, conditional session echo, SSE parsing,
+JSON-RPC matching — is about 70. Read it in one sitting.
 
 ---
 
@@ -138,8 +167,8 @@ independently of the live service. `fixtures/earn-now.sample.json` is a real cap
 
 | Symptom | Cause |
 |---|---|
-| `HTTP 402` from `/v1/bounties` | That endpoint is paid: $0.01 USDC on Base via x402. This client deliberately does not touch it. |
-| `Connection timed out` | `*.workers.dev` is unreachable on some networks (DNS interference). Fall back to `python3 abf.py feed`. |
+| `HTTP 402` from `/v1/bounties` | That endpoint is paid: 0.01 USDC on Base via x402. It returns `PAYMENT-REQUIRED` with the `payTo` address. This client deliberately does not touch it. |
+| `Connection timed out` | `*.workers.dev` is blocked on some networks. The block is at SNI level, so changing DNS or `/etc/hosts` will not help — use a proxy, or fall back to `python3 abf.py feed`. |
 | `no JSON-RPC response with id=…` | The server switched framing. Print the raw body and check `Content-Type`. |
 | Empty table | The board is genuinely empty; `/earn-now` returns `count: 0` rather than an error. |
 
