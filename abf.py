@@ -135,6 +135,8 @@ class MCP:
 
     def call_tool(self, name, arguments=None):
         result = self.rpc("tools/call", {"name": name, "arguments": arguments or {}})
+        if not isinstance(result, dict):
+            return result
         # newer servers put the machine-readable payload in structuredContent;
         # older ones only ship a JSON string inside a text block
         if isinstance(result.get("structuredContent"), (dict, list)):
@@ -158,6 +160,24 @@ def money(value):
 
 
 FRICTION = ("kyc", "stake", "bond", "purchase", "human_only")
+USD_LIKE = ("USD", "USDC", "OUSD", "USDT", "DAI")
+
+
+def amount_of(item):
+    """Normalised USD value, or None when it cannot be established.
+
+    est_usd is the feed's own normalisation and always wins. Some sources leave it
+    null and only fill reward/currency, which used to make those items vanish from
+    every --min-usd filter; a stablecoin reward is a safe fallback, anything else
+    (FLAPJAX, points, unknown) is not.
+    """
+    raw = item.get("est_usd")
+    if raw is None and str(item.get("currency", "")).upper() in USD_LIKE:
+        raw = item.get("reward")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_requires(value):
@@ -207,11 +227,8 @@ def filter_items(items, min_usd=0.0, source=None, exclude_requires=(), closes_wi
     blocked = set(exclude_requires or ())
     kept = []
     for it in items:
-        try:
-            amount = float(it.get("est_usd") or 0)
-        except (TypeError, ValueError):
-            continue
-        if amount < min_usd:
+        amount = amount_of(it)
+        if amount is None or amount < min_usd:
             continue
         if source and it.get("source") != source:
             continue
@@ -362,7 +379,7 @@ def print_bounties(items, limit=None):
     for it in items:
         print("%-34s %7s  %-11s %-7s %s" % (
             str(it.get("id", ""))[:34],
-            money(it.get("est_usd", it.get("reward"))),
+            money(amount_of(it)),
             str(it.get("source", ""))[:11],
             closes_label(it.get("deadline")),
             str(it.get("title", ""))[:50],
@@ -396,7 +413,11 @@ def cmd_mcp(args):
     info = client.initialize()
     server = info.get("serverInfo", {})
     tools = client.list_tools()
-    result = client.call_tool(args.tool, json.loads(args.arguments))
+    try:
+        arguments = json.loads(args.arguments)
+    except ValueError:
+        sys.exit("--arguments must be a JSON object, got: %s" % args.arguments[:80])
+    result = client.call_tool(args.tool, arguments)
 
     if args.json:
         emit({"server": server, "protocol": info.get("protocolVersion"),
@@ -430,7 +451,7 @@ def cmd_feed(args):
         sys.exit("feed.json returned HTTP %s" % status)
     data = json.loads(body)
     items = data if isinstance(data, list) else data.get("items", [])
-    items = filter_items(items, 0.0, args.source, args.exclude_requires,
+    items = filter_items(items, args.min_usd, args.source, args.exclude_requires,
                          args.closes_within)
     items = items[:args.top] if args.top else items
     if emit({"count": len(items), "items": items}, args.json):
@@ -442,6 +463,8 @@ def cmd_check(args):
     """Is this bounty worth the work? PRs already open on it, and is the repo alive?"""
     if args.all:
         return check_board(args)
+    if not args.target:
+        sys.exit("check needs a bounty id or an issue URL, or --all for the whole board")
 
     target = args.target.strip()
     parsed = parse_issue_url(target)
@@ -544,6 +567,9 @@ def save_state(path, state):
 
 def cmd_watch(args):
     """Poll the board and report only what is new, with a verdict attached."""
+    if args.interval < 30 and not args.once:
+        sys.exit("--interval must be at least 30 seconds, got %d" % args.interval)
+
     state = load_state(args.state)
     seen = state.setdefault("seen", {})
     first_pass = not seen
@@ -749,7 +775,7 @@ def main():
         print("hint: blocked network? export HTTPS_PROXY=http://host:port; "
               "offline checks still work: python3 abf.py selftest")
         sys.exit(1)
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         sys.exit("error: %s" % exc)
     except KeyboardInterrupt:
         sys.exit(130)

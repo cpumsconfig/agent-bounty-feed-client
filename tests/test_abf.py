@@ -199,8 +199,15 @@ class TestCommandJSONOutput(ServerCase):
         self.assertEqual(out["count"], 2)
 
     def test_feed_json(self):
-        out = self.run_json(abf.cmd_feed, top=4, source=None, exclude_requires=(), closes_within=None, json=True)
+        out = self.run_json(abf.cmd_feed, top=4, min_usd=0.0, source=None,
+                            exclude_requires=(), closes_within=None, json=True)
         self.assertEqual(out["count"], 4)
+
+    def test_feed_honours_min_usd(self):
+        # regression: cmd_feed used to pass a hardcoded 0.0 and ignore --min-usd
+        out = self.run_json(abf.cmd_feed, top=99, min_usd=5.0, source=None,
+                            exclude_requires=(), closes_within=None, json=True)
+        self.assertEqual(out["count"], 3)
 
     def test_mcp_json(self):
         out = self.run_json(abf.cmd_mcp, url=self.url, tool="list_bounties",
@@ -253,6 +260,15 @@ class TestCompetitionCheck(unittest.TestCase):
         verdict, why = abf.judge(age_days=1, prs=0, merged=40)
         self.assertEqual(verdict, "worth a look")
         self.assertIn("0 PRs", why)
+
+    def test_check_without_target_says_so(self):
+        import argparse
+        args = argparse.Namespace(all=False, target=None, min_usd=0.0, source=None,
+                                  exclude_requires=(), closes_within=None, json=False,
+                                  limit=10)
+        with self.assertRaises(SystemExit) as ctx:
+            abf.cmd_check(args)
+        self.assertIn("needs a bounty id", str(ctx.exception))
 
     def test_judge_boundaries(self):
         self.assertEqual(abf.judge(1, 10, 50)[0], "worth a look")   # 10 is not > 10
@@ -349,6 +365,36 @@ class TestWatchState(unittest.TestCase):
     def test_save_leaves_no_tmp_file(self):
         abf.save_state(self.path, {"seen": {}})
         self.assertEqual([f for f in os.listdir(self.dir) if f.endswith(".tmp")], [])
+
+
+class TestAmountOf(unittest.TestCase):
+    """Regression: items with est_usd null used to vanish from every --min-usd filter.
+
+    taskmarket:TSK-Y7YSTT0V is the real case: est_usd null, reward 100, currency OUSD.
+    Before this fix, `earn-now --min-usd 5` silently hid a $100 bounty.
+    """
+
+    def test_est_usd_wins(self):
+        self.assertEqual(abf.amount_of({"est_usd": 16, "reward": 999}), 16.0)
+
+    def test_falls_back_to_stablecoin_reward(self):
+        self.assertEqual(abf.amount_of({"est_usd": None, "reward": 100, "currency": "OUSD"}), 100.0)
+        self.assertEqual(abf.amount_of({"est_usd": None, "reward": 1, "currency": "USDC"}), 1.0)
+
+    def test_refuses_non_stablecoin_reward(self):
+        self.assertIsNone(abf.amount_of({"est_usd": None, "reward": 250000, "currency": "FLAPJAX"}))
+
+    def test_unknown_amount_is_none(self):
+        self.assertIsNone(abf.amount_of({}))
+        self.assertIsNone(abf.amount_of({"est_usd": None, "reward": None}))
+
+    def test_garbage_is_none(self):
+        self.assertIsNone(abf.amount_of({"est_usd": "lots"}))
+
+    def test_the_100_usd_bounty_survives_a_min_usd_filter(self):
+        item = {"id": "taskmarket:TSK-Y7YSTT0V", "est_usd": None,
+                "reward": 100.0, "currency": "OUSD"}
+        self.assertEqual(len(abf.filter_items([item], 5)), 1)
 
 
 class TestDeadline(unittest.TestCase):
