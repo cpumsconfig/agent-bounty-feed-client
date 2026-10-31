@@ -526,6 +526,57 @@ class TestClosesWithinFilter(unittest.TestCase):
         self.assertEqual(len(abf.filter_items(items, 0, None, (), closes_within=None)), 1)
 
 
+class TestWatchLoop(unittest.TestCase):
+    """The first pass must be silent with or without --once, and the loop must
+    remember that it already had one."""
+
+    def setUp(self):
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+        self.state = os.path.join(self.dir, "s.json")
+
+    def _run(self, once, items):
+        import argparse
+        class Stop(Exception):
+            pass
+        orig_feed, orig_sleep = abf.load_feed, abf.time.sleep
+        abf.load_feed = lambda: items
+        abf.time.sleep = lambda _s: (_ for _ in ()).throw(Stop())
+        args = argparse.Namespace(interval=30, once=once, state=self.state,
+                                  min_usd=0.0, source=None, exclude_requires=(),
+                                  closes_within=None)
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):
+                try:
+                    abf.cmd_watch(args)
+                except Stop:
+                    pass
+        finally:
+            abf.load_feed, abf.time.sleep = orig_feed, orig_sleep
+        return buf.getvalue()
+
+    def test_first_pass_is_silent_without_once(self):
+        out = self._run(False, [{"id": "a", "est_usd": 5, "title": "t"}])
+        self.assertIn("first pass", out)
+        self.assertNotIn("NEW", out)
+
+    def test_second_pass_reports_new_items(self):
+        self._run(False, [{"id": "a", "est_usd": 5, "title": "t"}])       # records a
+        out = self._run(False, [{"id": "a", "est_usd": 5, "title": "t"},
+                                {"id": "b", "est_usd": 7, "title": "u"}])
+        self.assertIn("NEW", out)
+        self.assertIn("u", out)
+        self.assertNotIn("first pass", out)
+
+    def test_reward_only_item_shows_its_amount(self):
+        self._run(False, [{"id": "a", "est_usd": 5, "title": "t"}])
+        out = self._run(False, [{"id": "a", "est_usd": 5, "title": "t"},
+                                {"id": "c", "est_usd": None, "reward": 100.0,
+                                 "currency": "OUSD", "title": "big"}])
+        self.assertIn("$100", out)
+
+
 class TestFixtureShape(unittest.TestCase):
     """fixtures/earn-now.sample.json is a real captured response."""
 

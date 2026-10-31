@@ -584,8 +584,9 @@ def cmd_watch(args):
             time.sleep(args.interval)
             continue
 
-        fresh = new_items(seen, items, args.min_usd, args.source, args.exclude_requires)
-        if args.once and first_pass:
+        fresh = new_items(seen, items, args.min_usd, args.source,
+                          args.exclude_requires, args.closes_within)
+        if first_pass:
             print("[%s] first pass: %d item(s) match, recording state (nothing reported)"
                   % (stamp(), len(fresh)))
         else:
@@ -599,7 +600,7 @@ def cmd_watch(args):
                     except Exception as exc:
                         verdict, why = "error", str(exc)[:70]
                 print("[%s] NEW  %-8s %-12s %s" % (
-                    stamp(), money(it.get("est_usd")), verdict.upper(),
+                    stamp(), money(amount_of(it)), verdict.upper(),
                     (it.get("title") or "")[:60]))
                 if why:
                     print("            %s" % why)
@@ -610,6 +611,7 @@ def cmd_watch(args):
                                args.exclude_requires, args.closes_within):
             seen.setdefault(it["id"], {"first_seen": stamp()})
         save_state(args.state, state)
+        first_pass = False
 
         if args.once:
             return
