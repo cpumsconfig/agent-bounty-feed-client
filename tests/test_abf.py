@@ -6,6 +6,7 @@ to download. `python3 abf.py selftest` runs this file.
     python3 -m unittest discover -s tests -v
 """
 
+import datetime
 import io
 import json
 import os
@@ -188,17 +189,17 @@ class TestCommandJSONOutput(ServerCase):
         return json.loads(buf.getvalue())
 
     def test_earn_now_json_filters(self):
-        out = self.run_json(abf.cmd_earn_now, min_usd=5.0, limit=None, source=None, exclude_requires=(), json=True)
+        out = self.run_json(abf.cmd_earn_now, min_usd=5.0, limit=None, source=None, exclude_requires=(), closes_within=None, json=True)
         self.assertEqual(out["count"], 3)
         self.assertEqual(out["items"][0]["id"], "frantic:129")
         self.assertEqual(out["min_usd"], 5.0)
 
     def test_earn_now_json_limit(self):
-        out = self.run_json(abf.cmd_earn_now, min_usd=0.0, limit=2, source=None, exclude_requires=(), json=True)
+        out = self.run_json(abf.cmd_earn_now, min_usd=0.0, limit=2, source=None, exclude_requires=(), closes_within=None, json=True)
         self.assertEqual(out["count"], 2)
 
     def test_feed_json(self):
-        out = self.run_json(abf.cmd_feed, top=4, source=None, exclude_requires=(), json=True)
+        out = self.run_json(abf.cmd_feed, top=4, source=None, exclude_requires=(), closes_within=None, json=True)
         self.assertEqual(out["count"], 4)
 
     def test_mcp_json(self):
@@ -212,7 +213,7 @@ class TestCommandJSONOutput(ServerCase):
         import argparse
         buf = io.StringIO()
         with redirect_stdout(buf):
-            abf.cmd_earn_now(argparse.Namespace(min_usd=5.0, limit=None, source=None, exclude_requires=(), json=False))
+            abf.cmd_earn_now(argparse.Namespace(min_usd=5.0, limit=None, source=None, exclude_requires=(), closes_within=None, json=False))
         self.assertIn("filter: est_usd >= 5", buf.getvalue())
         self.assertIn("3 item(s)", buf.getvalue())
 
@@ -348,6 +349,74 @@ class TestWatchState(unittest.TestCase):
     def test_save_leaves_no_tmp_file(self):
         abf.save_state(self.path, {"seen": {}})
         self.assertEqual([f for f in os.listdir(self.dir) if f.endswith(".tmp")], [])
+
+
+class TestDeadline(unittest.TestCase):
+    """Deadlines decide what is worth starting, so they get their own tests."""
+
+    @staticmethod
+    def iso_in(hours):
+        stamp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=hours)
+        return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def test_parses_zulu_timestamp(self):
+        parsed = abf.parse_deadline("2026-11-02T06:13:01Z")
+        self.assertEqual(parsed.year, 2026)
+        self.assertIsNotNone(parsed.tzinfo)
+
+    def test_parses_fractional_seconds(self):
+        self.assertIsNotNone(abf.parse_deadline("2026-11-02T06:13:01.227Z"))
+
+    def test_missing_deadline_is_none(self):
+        self.assertIsNone(abf.parse_deadline(None))
+        self.assertIsNone(abf.parse_deadline(""))
+
+    def test_garbage_is_none(self):
+        self.assertIsNone(abf.parse_deadline("next tuesday"))
+
+    def test_hours_left_is_positive_for_the_future(self):
+        self.assertAlmostEqual(abf.hours_left(self.iso_in(10)), 10, delta=0.1)
+
+    def test_hours_left_is_negative_when_past(self):
+        self.assertLess(abf.hours_left(self.iso_in(-5)), 0)
+
+    def test_hours_left_open_ended(self):
+        self.assertIsNone(abf.hours_left(None))
+
+    def test_closes_label_formats(self):
+        # 5.5h, not 5h: strftime drops sub-seconds, so 5 would truncate to "4h"
+        self.assertEqual(abf.closes_label(self.iso_in(5.5)), "5h")
+        # 72h lands a hair under three days after truncation; assert the shape, not the edge
+        days = abf.closes_label(self.iso_in(72))
+        self.assertTrue(days.endswith("d") and days[:-1].isdigit(), days)
+        self.assertEqual(abf.closes_label(self.iso_in(-1)), "past")
+        self.assertEqual(abf.closes_label(None), "—")
+
+    def test_parse_since_relative(self):
+        self.assertRegex(abf.parse_since("6h"), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+    def test_parse_since_passthrough(self):
+        self.assertEqual(abf.parse_since("2026-10-30T00:00:00Z"), "2026-10-30T00:00:00Z")
+
+
+class TestClosesWithinFilter(unittest.TestCase):
+
+    @staticmethod
+    def iso_in(hours):
+        stamp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=hours)
+        return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def test_keeps_only_items_inside_the_window(self):
+        items = [{"id": "soon", "est_usd": 5, "deadline": self.iso_in(3)},
+                 {"id": "later", "est_usd": 5, "deadline": self.iso_in(200)},
+                 {"id": "open", "est_usd": 5, "deadline": None},
+                 {"id": "gone", "est_usd": 5, "deadline": self.iso_in(-2)}]
+        kept = [i["id"] for i in abf.filter_items(items, 0, None, (), closes_within=24)]
+        self.assertEqual(kept, ["soon"])
+
+    def test_none_means_no_filter(self):
+        items = [{"id": "a", "est_usd": 5, "deadline": None}]
+        self.assertEqual(len(abf.filter_items(items, 0, None, (), closes_within=None)), 1)
 
 
 class TestFixtureShape(unittest.TestCase):

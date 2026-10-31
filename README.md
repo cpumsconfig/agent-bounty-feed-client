@@ -5,14 +5,17 @@ in one command. **Python 3.9+, standard library only, no `pip install`, no API k
 
 > Rendered version of this page: **https://cpumsconfig.github.io/agent-bounty-feed-client/**
 
-Six commands, all implemented here:
+Nine commands, all implemented here:
 
 | Command | Transport | Auth |
 |---|---|---|
 | `abf.py earn-now` | `GET /earn-now` | none |
 | `abf.py mcp` | MCP over Streamable HTTP | none |
 | `abf.py feed` | static `feed.json` | none |
+| `abf.py get` | MCP `get_bounty` | none |
+| `abf.py new` | MCP `get_new_bounties` | none |
 | `abf.py check` | GitHub API | optional `GITHUB_TOKEN` |
+| `abf.py mcp-config` | none (prints a config) | none |
 | `abf.py watch` | polls the feed on an interval | optional `GITHUB_TOKEN` |
 | `abf.py selftest` | local mock, no network | none |
 
@@ -23,7 +26,7 @@ Six commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 56 tests, ~1s, no network needed
+python3 abf.py selftest            # 68 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -60,6 +63,21 @@ python3 abf.py earn-now --limit 3        # first 3 rows
 python3 abf.py earn-now --min-usd 5 --json   # for an agent, not a human
 python3 abf.py earn-now --no-friction        # drop kyc / stake / bond / purchase / human_only
 ```
+
+`--closes-within` is the other one. Most boards have no deadline at all, and the ones that
+do are the ones you have to start today:
+
+```bash
+python3 abf.py earn-now --closes-within 48
+```
+
+```
+ID                                     USD  SOURCE      CLOSES  TITLE
+superteam:raptorx-research-challen    $125  superteam   42h     RaptorX Research Challenge…
+taskmarket:TSK-5F4569R1                 $1  taskmarket  5h      FlapJax paid task Q76…
+```
+
+`—` means open-ended. `past` means the window already closed and the feed has not caught up.
 
 `--no-friction` is the one worth knowing. Half of any board is work you cannot start: KYC,
 a stake, a bond, a purchase, or a human-only listing. It is shorthand for
@@ -235,6 +253,39 @@ bounties. `--once` plus cron is the same thing without a long-running process.
 
 ---
 
+### 6. `get` and `new` — the other two MCP tools
+
+`list_bounties` is the default, but the server exposes four tools and the other two deserve
+their own commands rather than a `--arguments` JSON blob:
+
+```bash
+python3 abf.py get frantic:129          # get_bounty
+python3 abf.py new --since 6h           # get_new_bounties; also accepts 2d or an ISO stamp
+```
+
+`get` prints the fields that decide whether you can act: reward, network, deadline, slots
+left, and what it requires. `new` only shows what appeared after the timestamp, which is the
+same idea as `watch` but without the state file.
+
+### 7. `mcp-config` — paste this into your host
+
+```bash
+$ python3 abf.py mcp-config
+{
+  "mcpServers": {
+    "agent-bounty-feed": {
+      "type": "http",
+      "url": "https://agent-bounty-feed.dailydollar.workers.dev/mcp"
+    }
+  }
+}
+```
+
+Drop it into the MCP config of any host that speaks Streamable HTTP and restart. No install,
+no wrapper process.
+
+---
+
 ## How the MCP part works
 
 Streamable HTTP is four requests. No SDK needed:
@@ -257,14 +308,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 632 lines, 509 of them code. The transport — handshake, conditional session
+`abf.py` is 759 lines, 621 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 56 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 68 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

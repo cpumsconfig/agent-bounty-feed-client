@@ -167,7 +167,37 @@ def parse_requires(value):
     return tuple(p.strip().lower() for p in value.split(",") if p.strip())
 
 
-def filter_items(items, min_usd=0.0, source=None, exclude_requires=()):
+def parse_deadline(value):
+    """ISO-8601 deadline string -> aware datetime, or None when absent/unparseable."""
+    if not value:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def hours_left(value):
+    """Hours until a deadline. Negative means it has passed. None means open-ended."""
+    dl = parse_deadline(value)
+    if dl is None:
+        return None
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return (dl - now).total_seconds() / 3600.0
+
+
+def parse_since(value):
+    """'6h' / '2d' / an ISO timestamp -> an ISO timestamp the MCP tool accepts."""
+    text = str(value).strip()
+    unit = text[-1:].lower()
+    if unit in ("h", "d") and text[:-1].isdigit():
+        delta = datetime.timedelta(hours=int(text[:-1])) if unit == "h"             else datetime.timedelta(days=int(text[:-1]))
+        stamp = datetime.datetime.now(datetime.timezone.utc) - delta
+        return stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return text
+
+
+def filter_items(items, min_usd=0.0, source=None, exclude_requires=(), closes_within=None):
     """Keep items whose est_usd is known and >= min_usd, preserving feed order.
 
     exclude_requires drops any item whose requires[] intersects the list — the same
@@ -187,6 +217,10 @@ def filter_items(items, min_usd=0.0, source=None, exclude_requires=()):
             continue
         if blocked and blocked & set(it.get("requires") or ()):
             continue
+        if closes_within is not None:
+            left = hours_left(it.get("deadline"))
+            if left is None or left < 0 or left > closes_within:
+                continue
         kept.append(it)
     return kept
 
@@ -305,25 +339,36 @@ def check_issue(owner, repo, number):
     }
 
 
+def closes_label(value):
+    """Compact time-to-deadline: '3d', '18h', 'past', or an em dash when open-ended."""
+    left = hours_left(value)
+    if left is None:
+        return "—"
+    if left < 0:
+        return "past"
+    if left < 48:
+        return "%dh" % int(left)
+    return "%dd" % int(left / 24)
+
+
 def print_bounties(items, limit=None):
     if limit:
         items = items[:limit]
     if not items:
         print("no items")
         return
-    print("%-34s %7s  %-11s %s" % ("ID", "USD", "SOURCE", "TITLE"))
-    print("-" * 100)
+    print("%-34s %7s  %-11s %-7s %s" % ("ID", "USD", "SOURCE", "CLOSES", "TITLE"))
+    print("-" * 108)
     for it in items:
-        print("%-34s %7s  %-11s %s" % (
+        print("%-34s %7s  %-11s %-7s %s" % (
             str(it.get("id", ""))[:34],
             money(it.get("est_usd", it.get("reward"))),
             str(it.get("source", ""))[:11],
-            str(it.get("title", ""))[:56],
+            closes_label(it.get("deadline")),
+            str(it.get("title", ""))[:50],
         ))
-    print("\n%d item(s)" % len(items))
-
-
-# ---------------------------------------------------------------- commands
+    print("")
+    print("%d item(s)" % len(items))
 
 def cmd_earn_now(args):
     status, _, body = http(BASE + "/earn-now")
@@ -331,7 +376,7 @@ def cmd_earn_now(args):
         sys.exit("earn-now returned HTTP %s: %s" % (status, body[:200]))
     data = json.loads(body)
     items = filter_items(data.get("items", []), args.min_usd, args.source,
-                         args.exclude_requires)
+                         args.exclude_requires, args.closes_within)
     if args.limit:
         items = items[:args.limit]
     if emit({"generated_at": data.get("generated_at"),
@@ -385,7 +430,8 @@ def cmd_feed(args):
         sys.exit("feed.json returned HTTP %s" % status)
     data = json.loads(body)
     items = data if isinstance(data, list) else data.get("items", [])
-    items = filter_items(items, 0.0, args.source, args.exclude_requires)
+    items = filter_items(items, 0.0, args.source, args.exclude_requires,
+                         args.closes_within)
     items = items[:args.top] if args.top else items
     if emit({"count": len(items), "items": items}, args.json):
         return
@@ -434,7 +480,8 @@ def cmd_check(args):
 
 def check_board(args):
     """Triage the whole board: run the check on every GitHub-issue bounty, best first."""
-    items = filter_items(load_feed(), args.min_usd, args.source, args.exclude_requires)
+    items = filter_items(load_feed(), args.min_usd, args.source,
+                         args.exclude_requires, args.closes_within)
     targets = [(it, parse_issue_url(it.get("url", ""))) for it in items]
     targets = [(it, p) for it, p in targets if p]
     if args.limit:
@@ -474,9 +521,9 @@ def check_board(args):
             print("  -> %s#%d  %s" % (r["repo"], r["issue"], r["why"]))
 
 
-def new_items(seen, items, min_usd=0.0, source=None, exclude_requires=()):
+def new_items(seen, items, min_usd=0.0, source=None, exclude_requires=(), closes_within=None):
     """Items that pass the filters and whose id is not in the state map yet."""
-    kept = filter_items(items, min_usd, source, exclude_requires)
+    kept = filter_items(items, min_usd, source, exclude_requires, closes_within)
     return [it for it in kept if it.get("id") not in seen]
 
 
@@ -533,7 +580,8 @@ def cmd_watch(args):
                 if it.get("url"):
                     print("            %s" % it["url"])
 
-        for it in filter_items(items, args.min_usd, args.source, args.exclude_requires):
+        for it in filter_items(items, args.min_usd, args.source,
+                               args.exclude_requires, args.closes_within):
             seen.setdefault(it["id"], {"first_seen": stamp()})
         save_state(args.state, state)
 
@@ -544,6 +592,61 @@ def cmd_watch(args):
 
 def stamp():
     return datetime.datetime.now().strftime("%H:%M:%S")
+
+
+def cmd_get(args):
+    """One bounty, straight from the get_bounty MCP tool."""
+    client = MCP(args.url)
+    client.initialize()
+    result = client.call_tool("get_bounty", {"id": args.id})
+    if args.json:
+        emit(result, True)
+        return
+    if isinstance(result, str):
+        print(result)
+        return
+    # the tool wraps the bounty: {"generated_at": ..., "item": {...}, "note": ...}
+    item = result.get("item") if isinstance(result.get("item"), dict) else result
+    print("%s  %s" % (item.get("id", "?"), item.get("title", "")))
+    print("-" * 88)
+    for key in ("est_usd", "currency", "source", "network", "deadline",
+                "slots_left", "requires", "url", "first_seen"):
+        if key in item:
+            value = item[key]
+            if isinstance(value, (list, dict)):
+                value = json.dumps(value, ensure_ascii=False)
+            if value is None:
+                value = "—"
+            print("%-11s %s" % (key, value))
+    note = result.get("note")
+    if note:
+        print("")
+        print("note: %s" % str(note)[:220])
+
+
+def cmd_new(args):
+    """Only what appeared after a timestamp: --since 6h, 2d, or an ISO string."""
+    since = parse_since(args.since)
+    client = MCP(args.url)
+    client.initialize()
+    result = client.call_tool("get_new_bounties", {"since": since})
+    items = result.get("items", []) if isinstance(result, dict) else []
+    items = filter_items(items, args.min_usd, args.source, args.exclude_requires,
+                         args.closes_within)
+    if args.json:
+        emit({"since": since, "count": len(items), "items": items}, True)
+        return
+    print("new since %s" % since)
+    print("")
+    print_bounties(items, args.limit)
+
+
+def cmd_mcp_config(args):
+    """A paste-ready MCP server block for any host that speaks Streamable HTTP."""
+    config = {"mcpServers": {"agent-bounty-feed": {"type": "http", "url": MCP_URL}}}
+    print(json.dumps(config, indent=2))
+    if not args.quiet:
+        print("Paste this into the MCP config of your host and restart it.")
 
 
 def cmd_selftest(args):
@@ -566,6 +669,8 @@ def add_filter_args(p):
                    help="drop items needing any of these, e.g. kyc,stake,bond")
     p.add_argument("--no-friction", action="store_true",
                    help="shorthand for --exclude-requires %s" % ",".join(FRICTION))
+    p.add_argument("--closes-within", type=float, default=None, metavar="HOURS",
+                   help="only items whose deadline is within this many hours")
 
 
 def main():
@@ -600,6 +705,24 @@ def main():
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_check)
 
+    p = sub.add_parser("get", help="one bounty by id (MCP get_bounty)")
+    p.add_argument("id", help="e.g. frantic:129")
+    p.add_argument("--url", default=MCP_URL)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_get)
+
+    p = sub.add_parser("new", help="only what appeared after a time (MCP get_new_bounties)")
+    p.add_argument("--since", default="24h", help="6h, 2d, or an ISO timestamp")
+    p.add_argument("--url", default=MCP_URL)
+    add_filter_args(p)
+    p.add_argument("--limit", type=int, default=None)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=cmd_new)
+
+    p = sub.add_parser("mcp-config", help="print a paste-ready MCP server config")
+    p.add_argument("--quiet", action="store_true", help="JSON only, no trailing hint")
+    p.set_defaults(func=cmd_mcp_config)
+
     p = sub.add_parser("watch", help="poll the board, report only new items with a verdict")
     p.add_argument("--interval", type=int, default=300, help="seconds between polls")
     add_filter_args(p)
@@ -616,12 +739,16 @@ def main():
         args.exclude_requires = ",".join(FRICTION)
     if hasattr(args, "exclude_requires"):
         args.exclude_requires = parse_requires(args.exclude_requires)
+    for name in ("min_usd", "source", "exclude_requires", "closes_within"):
+        if not hasattr(args, name):
+            setattr(args, name, None if name in ("source", "closes_within") else (() if name == "exclude_requires" else 0.0))
     try:
         args.func(args)
     except urllib.error.URLError as exc:
-        sys.exit("network error: %s\n"
-                 "hint: *.workers.dev is unreachable on some networks (DNS interference).\n"
-                 "      fall back with: python3 abf.py feed" % getattr(exc, "reason", exc))
+        print("network error: %s" % getattr(exc, "reason", exc))
+        print("hint: blocked network? export HTTPS_PROXY=http://host:port; "
+              "offline checks still work: python3 abf.py selftest")
+        sys.exit(1)
     except RuntimeError as exc:
         sys.exit("error: %s" % exc)
     except KeyboardInterrupt:
