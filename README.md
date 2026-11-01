@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 128 tests, ~1s, no network needed
+python3 abf.py selftest            # 131 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -355,14 +355,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1077 lines, 874 of them code. The transport — handshake, conditional session
+`abf.py` is 1081 lines, 877 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 128 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 131 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 
@@ -380,6 +380,11 @@ Run the same suite directly if you prefer unittest:
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+`tests/test_abf.py` also generates a 20,000-item feed in memory (`synthetic_feed`) and
+asserts the whole `reachable` path finishes under five seconds. That test exists because
+the tier diffs were `it not in split[...]` — list membership by dict equality, quadratic:
+6,000 items took 0.68s, now 0.02s.
 
 `fixtures/edge-feed.json` is the adversarial one: unpriced, NaN price, naive deadline,
 `requires` as a list and as a comma string, expired, a dead source, a source whose

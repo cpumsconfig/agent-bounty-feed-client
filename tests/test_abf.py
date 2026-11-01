@@ -6,6 +6,7 @@ to download. `python3 abf.py selftest` runs this file.
     python3 -m unittest discover -s tests -v
 """
 
+import argparse
 import datetime
 import io
 import json
@@ -961,6 +962,68 @@ class TestEdgeFeed(unittest.TestCase):
         self.assertEqual(payload["winnable"]["count"], 3)
         self.assertEqual(payload["winnable"]["usd"], 52.0)
         self.assertEqual(sorted(payload["dead_sources"]), ["deadsrc", "quotedsrc"])
+
+
+def synthetic_feed(n, dead_source="s1"):
+    """A deterministic feed of n items with a mix of every branch.
+
+    Generated rather than stored: a 20k-item JSON would be megabytes in the repo for
+    no extra coverage.
+    """
+    items = []
+    for i in range(n):
+        items.append({
+            "id": "s%d:%d" % (i % 7, i),
+            "source": "s%d" % (i % 7),
+            "est_usd": (i % 50) + 1,
+            "currency": "USD",
+            "requires": ["wallet_evm"] if i % 3 else ["kyc"],
+            "deadline": "2026-12-01T00:00:00Z" if i % 4 else None,
+            "eligibility": "So far %d paid / %d rejected; %d submissions so far."
+                           % (i % 2, i % 20, i % 200),
+            "title": "t%d" % i,
+        })
+    return {"items": items,
+            "stats": {"payout_evidence": {dead_source: {"paid_count": 0}}}}
+
+
+class TestScale(unittest.TestCase):
+    """The board is 25 items today; the code should not fall over at 20k.
+
+    The tier diffs used list membership (`it not in split[...]`), which is O(n^2) on
+    dict equality: 6000 items took 0.68s before, 0.02s after.
+    """
+
+    def test_five_thousand_items(self):
+        doc = synthetic_feed(5000)
+        split = abf.reachable_split(doc["items"], 50, doc["stats"]["payout_evidence"])
+        self.assertEqual(len(split["listed"]), 5000)
+        self.assertLessEqual(len(split["reachable"]), len(split["listed"]))
+        self.assertLessEqual(len(split["alive"]), len(split["reachable"]))
+        self.assertLessEqual(len(split["winnable"]), len(split["alive"]))
+
+    def test_twenty_thousand_items_stay_fast(self):
+        import time as _time
+        doc = synthetic_feed(20000)
+        orig = abf.load_feed_doc
+        abf.load_feed_doc = lambda: doc
+        try:
+            started = _time.time()
+            with redirect_stdout(io.StringIO()):
+                abf.cmd_reachable(argparse.Namespace(limit=0, max_subs=50, json=False))
+            elapsed = _time.time() - started
+        finally:
+            abf.load_feed_doc = orig
+        # generous: the point is to catch a return to quadratic behaviour, not to
+        # benchmark the machine
+        self.assertLess(elapsed, 5.0, "20k items took %.2fs" % elapsed)
+
+    def test_counts_are_consistent_at_scale(self):
+        doc = synthetic_feed(3000)
+        split = abf.reachable_split(doc["items"], 50, doc["stats"]["payout_evidence"])
+        self.assertEqual(len(split["listed"]) - len(split["reachable"]),
+                         len([i for i in split["listed"] if i not in split["reachable"]]))
+        self.assertGreater(len(split["dead"]), 0)   # s1 has paid_count 0
 
 
 class TestFixtureShape(unittest.TestCase):

@@ -931,9 +931,13 @@ def cmd_reachable(args):
         }, True)
         return
 
-    dropped_friction = [it for it in split["listed"] if it not in split["reachable"]]
-    dropped_dead = [it for it in split["reachable"] if it not in split["alive"]]
-    dropped_crowd = [it for it in split["alive"] if it not in split["winnable"]]
+    # identity sets, not `in` on a list: membership by equality made this O(n^2)
+    reachable_ids = {id(it) for it in split["reachable"]}
+    alive_ids = {id(it) for it in split["alive"]}
+    winnable_ids = {id(it) for it in split["winnable"]}
+    dropped_friction = [it for it in split["listed"] if id(it) not in reachable_ids]
+    dropped_dead = [it for it in split["reachable"] if id(it) not in alive_ids]
+    dropped_crowd = [it for it in split["alive"] if id(it) not in winnable_ids]
 
     def row(label, items, note=""):
         print(("%-10s %2d items  $%-10s %s" % (label, len(items), usd_total(total_usd(items)), note)).rstrip())
