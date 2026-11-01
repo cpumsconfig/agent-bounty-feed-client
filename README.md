@@ -289,31 +289,33 @@ no wrapper process.
 
 ### 8. `reachable` — the honest number
 
-A board can say $50,000 and contain $5 you can actually claim. `reachable` subtracts the three
-things that make a listing worthless, in order, and prints what is left:
+A board total is not the set of tasks a caller can start. `reachable` applies the friction
+filter and then the contest cut, and it prints what each subtraction removed:
 
 ```bash
 $ python3 abf.py reachable
-
-listed     25 items  $50,717.6
-reachable  15 items  $264.6      -10  kyc 9, purchase 1
-alive      11 items  $234.6      -4  never paid (frantic)
-winnable    7 items  $131.6      -4  crowded (50+ submissions)
-
-dead sources
-  frantic     0 paid / 20 rejected
 ```
 
-Each tier comes from a field the feed already carries:
+On feed `generated_at` 2026-11-01T01:45:14Z the tiers are:
+
+```text
+listed     24 items  $50,716.1
+reachable  14 items  $263.1      -10  kyc 9, purchase 1
+winnable   11 items  $161.1      -3  crowded (50+ submissions)
+```
+
+`So far N paid / M rejected.` stays on the task that stated it. A missing sentence stays
+unknown. The client does not turn the first sentence on a source into a source lifetime.
 
 | Tier | Rule |
 |---|---|
 | reachable | drops any item whose `requires` names a friction requirement |
-| alive | drops sources whose `eligibility` reports `0 paid / N rejected` with N > 10 |
 | winnable | drops items whose `eligibility` reports 50+ `submissions` |
 
-The third tier is an upper bound, not a promise: a source that does not report its submission
-count stays in, and the tool says so on its last line. `--json` returns all four counts.
+The contest tier is an upper bound, not a promise: a task that does not report a submission
+count stays in, and the tool says so on its last line. `--json` includes `source_lifetime`
+(`null`) and `task_payouts` (one object per parsed sentence). It does not include a
+source-wide dead list.
 
 ## How the MCP part works
 

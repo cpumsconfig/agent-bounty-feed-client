@@ -102,14 +102,11 @@ arakoodev/EdgeChains#273               $30    116      32  CROWDED      BOUNTY: 
 <p class="muted">Three numbers decide it: PRs already open, merges out of the last hundred closed PRs, and how old the issue is. More than ten PRs is crowded. Fewer than five merges means the repo has stalled and the reward may never move. Older than a week means the field is already in.</p>
 
 <h2>The number that actually matters</h2>
-<p>A board can say $50,000 and contain $5 you can claim. <code>reachable</code> subtracts the three things that make a listing worthless — a human-only requirement, a source that never pays, and a contest that is already over — and shows what each subtraction cost:</p>
-<pre><code>$ python3 abf.py reachable
-
-listed     25 items  $50,717.6
-reachable  15 items  $264.6      -10  kyc 9, purchase 1
-alive      11 items  $234.6      -4  never paid (frantic)
-winnable    7 items  $131.6      -4  crowded (50+ submissions)</code></pre>
-<p class="muted">Every tier is parsed from a field the feed already carries: <code>requires</code>, the <code>0 paid / N rejected</code> prose inside <code>eligibility</code>, and its <code>N submissions</code> count. That prose is the part a client cannot sort on until someone parses it — which is why the last line is an upper bound, not a promise, and the tool says so.</p>
+<p>A board total is not the set of tasks a caller can start. <code>reachable</code> subtracts a friction requirement and a crowded contest, and shows what each subtraction cost. A <code>So far N paid / M rejected.</code> sentence stays on that task. It is not a source lifetime:</p>
+<pre><code>listed     24 items  $50,716.1
+reachable  14 items  $263.1      -10  kyc 9, purchase 1
+winnable   11 items  $161.1      -3  crowded (50+ submissions)</code></pre>
+<p class="muted">Friction comes from <code>requires</code>. The contest cut uses the feed's own <code>N submissions</code> figure, and a task that does not report one stays in. Paid/rejected prose is listed per task. A missing sentence stays unknown. Sample tiers are from feed <code>generated_at</code> 2026-11-01T01:45:14Z.</p>
 
 <h2>Filter out work you cannot start</h2>
 <p>Half of any board needs KYC, a stake, a bond, a purchase, or a human. One flag removes all of it — on the current board, 25 listings become 15:</p>

@@ -527,7 +527,7 @@ class TestClosesWithinFilter(unittest.TestCase):
 
 
 class TestReachable(unittest.TestCase):
-    """The honest number: listed, reachable without a human, alive, winnable."""
+    """Listed, friction-filtered, then the contest cut. Inline fixtures, not a live feed."""
 
     FEED = [
         {"id": "a", "est_usd": 10, "source": "algora", "requires": ["github", "kyc"],
@@ -543,15 +543,11 @@ class TestReachable(unittest.TestCase):
     def test_payout_stats_parses_prose(self):
         self.assertEqual(abf.payout_stats("So far 0 paid / 22 rejected."), (0, 22))
 
-    def test_payout_stats_absent(self):
+    def test_payout_stats_absent_is_unknown(self):
         self.assertIsNone(abf.payout_stats("Stripe payout"))
         self.assertIsNone(abf.payout_stats(None))
-
-    def test_is_dead_boundary(self):
-        self.assertFalse(abf.is_dead((0, 10)))
-        self.assertTrue(abf.is_dead((0, 11)))
-        self.assertFalse(abf.is_dead((1, 500)))
-        self.assertFalse(abf.is_dead(None))
+        self.assertIsNone(abf.payout_stats("0 paid / rejected"))
+        self.assertIsNone(abf.payout_stats(""))
 
     def test_submission_count(self):
         self.assertEqual(abf.submission_count({"eligibility": "120 submissions so far"}), 120)
@@ -562,13 +558,15 @@ class TestReachable(unittest.TestCase):
         self.assertTrue(abf.is_contested({"eligibility": "50 submissions"}))
         self.assertFalse(abf.is_contested({"eligibility": "no numbers"}))
 
-    def test_split_drops_each_tier(self):
+    def test_split_drops_friction_and_crowd_only(self):
         split = abf.reachable_split(self.FEED)
         self.assertEqual(len(split["listed"]), 4)
         self.assertEqual([i["id"] for i in split["reachable"]], ["b", "c", "d"])   # a needs kyc
-        self.assertEqual([i["id"] for i in split["alive"]], ["c", "d"])           # frantic is dead
-        self.assertEqual([i["id"] for i in split["winnable"]], ["d"])             # taskmarket crowded
-        self.assertEqual(split["dead"], {"frantic"})
+        self.assertEqual([i["id"] for i in split["winnable"]], ["b", "d"])         # c is crowded
+        self.assertIsNone(split["source_lifetime"])
+        self.assertEqual(split["task_payouts"], [
+            {"id": "b", "source": "frantic", "paid": 0, "rejected": 22},
+        ])
 
     def test_friction_breakdown_counts_tags(self):
         tags = dict(abf.friction_breakdown(self.FEED))
@@ -595,8 +593,87 @@ class TestReachable(unittest.TestCase):
             abf.load_feed = orig
         payload = json.loads(buf.getvalue())
         self.assertEqual(payload["listed"]["usd"], 100.0)
-        self.assertEqual(payload["winnable"]["usd"], 40.0)
-        self.assertEqual(payload["dead_sources"], ["frantic"])
+        self.assertEqual(payload["reachable"]["usd"], 90.0)
+        self.assertEqual(payload["winnable"]["usd"], 60.0)
+        self.assertIsNone(payload["source_lifetime"])
+        self.assertNotIn("dead_sources", payload)
+        self.assertEqual([i["id"] for i in payload["items"]], ["d", "b"])
+        self.assertNotIn("never paid", buf.getvalue())
+
+
+class TestPayoutScope(unittest.TestCase):
+    """Task prose cannot mark a source lifetime. These lists are fixtures."""
+
+    @staticmethod
+    def row(id_, source, usd, requires, eligibility):
+        return {"id": id_, "est_usd": usd, "source": source, "requires": requires,
+                "eligibility": eligibility}
+
+    def mixed(self):
+        return [
+            self.row("frantic:129", "frantic", 16, ["wallet_evm"], "So far 0 paid / 22 rejected."),
+            self.row("frantic:142", "frantic", 3, ["wallet_evm"], "So far 20 paid / 57 rejected."),
+            self.row("frantic:130", "frantic", 3, ["wallet_evm"], "So far 2 paid / 66 rejected."),
+            self.row("kyc", "algora", 10, ["kyc"], "Paid in USD via Algora."),
+            self.row("stake", "board", 1, ["stake"], None),
+            self.row("bond", "board", 1, ["bond"], ""),
+            self.row("purchase", "frantic", 10, ["purchase"], "OUTLAY. So far 0 paid / 6 rejected."),
+            self.row("human", "board", 1, ["human_only"], "a person must do this"),
+            self.row("crowd", "taskmarket", 1, ["wallet_evm"], "200 submissions so far"),
+            self.row("plain", "direct", 5, ["wallet_evm"], "Single winner."),
+            self.row("malformed", "hondo", 4, ["wallet_evm"], "0 paid / rejected"),
+        ]
+
+    def test_mixed_zero_and_positive_stay_on_their_tasks(self):
+        split = abf.reachable_split(self.mixed())
+        kept = [i["id"] for i in split["winnable"]]
+        self.assertEqual(kept, ["frantic:129", "frantic:142", "frantic:130", "plain", "malformed"])
+        self.assertEqual([i["id"] for i in split["reachable"] if i["id"] == "crowd"], ["crowd"])
+        self.assertNotIn("crowd", kept)
+        for gate in ("kyc", "stake", "bond", "purchase", "human"):
+            self.assertNotIn(gate, [i["id"] for i in split["reachable"]])
+        self.assertIsNone(split["source_lifetime"])
+        self.assertEqual(split["task_payouts"], [
+            {"id": "frantic:129", "source": "frantic", "paid": 0, "rejected": 22},
+            {"id": "frantic:142", "source": "frantic", "paid": 20, "rejected": 57},
+            {"id": "frantic:130", "source": "frantic", "paid": 2, "rejected": 66},
+            {"id": "purchase", "source": "frantic", "paid": 0, "rejected": 6},
+        ])
+
+    def test_reordering_does_not_drop_a_paid_task(self):
+        forward = [i["id"] for i in abf.reachable_split(self.mixed())["winnable"]]
+        backward = [i["id"] for i in abf.reachable_split(list(reversed(self.mixed())))["winnable"]]
+        self.assertEqual(forward, list(reversed(backward)))
+        self.assertIn("frantic:142", backward)
+        payouts = abf.task_payouts(list(reversed(self.mixed())))
+        self.assertEqual(payouts[0]["id"], "purchase")
+        self.assertEqual(payouts[-1]["paid"], 0)
+
+    def test_all_zero_sample_is_not_a_source_lifetime(self):
+        items = [
+            self.row("z1", "frantic", 1, ["wallet_evm"], "So far 0 paid / 22 rejected."),
+            self.row("z2", "frantic", 1, ["wallet_evm"], "So far 0 paid / 40 rejected."),
+        ]
+        split = abf.reachable_split(items)
+        self.assertEqual([i["id"] for i in split["winnable"]], ["z1", "z2"])
+        self.assertIsNone(split["source_lifetime"])
+        self.assertEqual([row["paid"] for row in split["task_payouts"]], [0, 0])
+
+    def test_cli_json_keeps_the_positive_task(self):
+        import argparse
+        orig = abf.load_feed
+        abf.load_feed = lambda: self.mixed()
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                abf.cmd_reachable(argparse.Namespace(limit=None, json=True))
+        finally:
+            abf.load_feed = orig
+        payload = json.loads(buf.getvalue())
+        self.assertIsNone(payload["source_lifetime"])
+        self.assertNotIn("dead_sources", payload)
+        self.assertIn("frantic:142", [i["id"] for i in payload["items"]])
+        self.assertEqual(payload["task_payouts"][1]["paid"], 20)
 
 
 class TestWatchLoop(unittest.TestCase):

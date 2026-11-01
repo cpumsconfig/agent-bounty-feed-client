@@ -694,41 +694,39 @@ def cmd_mcp_config(args):
 
 PAID_RE = re.compile(r"([0-9]+) paid / ([0-9]+) rejected", re.I)
 SUBS_RE = re.compile(r"([0-9]+) submissions", re.I)
-DEAD_REJECTIONS = 10
 CONTESTED_AT = 50
 
 
 def payout_stats(eligibility):
-    """'0 paid / 22 rejected' -> (0, 22). None when the prose carries no numbers.
+    """'So far 0 paid / 22 rejected.' -> (0, 22). None when that sentence is absent.
 
-    The feed only states a source's payout history as prose inside eligibility, so
-    a client cannot sort on it without parsing. This is that parse.
+    The producer attaches this sentence to one task. Absence is unknown, not zero,
+    and the pair is not a source lifetime.
     """
-    match = PAID_RE.search(eligibility or "")
+    if not isinstance(eligibility, str):
+        return None
+    match = PAID_RE.search(eligibility)
     if not match:
         return None
     return int(match.group(1)), int(match.group(2))
 
 
-def source_health(items):
-    """First paid/rejected claim seen per source. Sources with no claim are absent."""
-    health = {}
+def task_payouts(items):
+    """Every parsed paid/rejected sentence, in feed order, each kept on its task."""
+    found = []
     for it in items:
-        source = it.get("source")
-        if source in health:
+        if not isinstance(it, dict):
             continue
         stats = payout_stats(it.get("eligibility"))
-        if stats:
-            health[source] = stats
-    return health
-
-
-def is_dead(stats):
-    """A source that has never paid and rejects a lot is a filter, not a slow start."""
-    if not stats:
-        return False
-    paid, rejected = stats
-    return paid == 0 and rejected > DEAD_REJECTIONS
+        if not stats:
+            continue
+        found.append({
+            "id": it.get("id"),
+            "source": it.get("source"),
+            "paid": stats[0],
+            "rejected": stats[1],
+        })
+    return found
 
 
 def submission_count(item):
@@ -744,20 +742,20 @@ def is_contested(item):
 
 
 def reachable_split(items):
-    """Three numbers: everything listed, what needs no human, what survives a dead source."""
+    """Listed, then the friction filter, then the unchanged contest cut.
+
+    Paid/rejected prose stays on the task that carried it. It does not remove
+    a source, and a missing sentence stays unknown rather than a lifetime zero.
+    """
     listed = [it for it in items if amount_of(it) is not None]
     reachable = filter_items(items, 0.0, None, FRICTION)
-    health = source_health(items)
-    dead = {s for s, st in health.items() if is_dead(st)}
-    alive = [it for it in reachable if it.get("source") not in dead]
-    winnable = [it for it in alive if not is_contested(it)]
+    winnable = [it for it in reachable if not is_contested(it)]
     return {
         "listed": listed,
         "reachable": reachable,
-        "alive": alive,
         "winnable": winnable,
-        "health": health,
-        "dead": dead,
+        "task_payouts": task_payouts(items),
+        "source_lifetime": None,
     }
 
 
@@ -775,41 +773,47 @@ def total_usd(items):
 
 
 def cmd_reachable(args):
-    """What is actually reachable: no KYC, no stake, no dead sources."""
+    """Friction filter, then the contest cut. Task payout prose is not a lifetime."""
     items = load_feed()
     split = reachable_split(items)
-    alive = sorted(split["winnable"], key=lambda it: -(amount_of(it) or 0))
+    shown = sorted(split["winnable"], key=lambda it: -(amount_of(it) or 0))
 
     if args.json:
         emit({
             "listed": {"count": len(split["listed"]), "usd": total_usd(split["listed"])},
             "reachable": {"count": len(split["reachable"]), "usd": total_usd(split["reachable"])},
-            "alive": {"count": len(split["alive"]), "usd": total_usd(split["alive"])},
-            "winnable": {"count": len(alive), "usd": total_usd(alive)},
-            "dead_sources": sorted(split["dead"]),
-            "items": alive,
+            "winnable": {"count": len(shown), "usd": total_usd(shown)},
+            "source_lifetime": None,
+            "task_payouts": split["task_payouts"],
+            "items": shown,
         }, True)
         return
 
     dropped_friction = [it for it in split["listed"] if it not in split["reachable"]]
-    dropped_dead = [it for it in split["reachable"] if it not in split["alive"]]
-    dropped_crowd = [it for it in split["alive"] if it not in split["winnable"]]
+    dropped_crowd = [it for it in split["reachable"] if it not in split["winnable"]]
 
-    def row(label, items, note=""):
-        print(("%-10s %2d items  $%-10s %s" % (label, len(items), usd_total(total_usd(items)), note)).rstrip())
+    def row(label, rows, note=""):
+        print(("%-10s %2d items  $%-10s %s" % (label, len(rows), usd_total(total_usd(rows)), note)).rstrip())
 
     tags = friction_breakdown(dropped_friction)
     row("listed", split["listed"], "")
     row("reachable", split["reachable"],
         "-%d  %s" % (len(dropped_friction),
                      ", ".join("%s %d" % (t, n) for t, n in tags) or "friction"))
-    row("alive", split["alive"],
-        "-%d  never paid (%s)" % (len(dropped_dead), ", ".join(sorted(split["dead"])) or "none"))
     row("winnable", split["winnable"],
         "-%d  crowded (%d+ submissions)" % (len(dropped_crowd), CONTESTED_AT))
 
     print("")
-    print_bounties(alive, args.limit)
+    print("task payout observations (this task's eligibility prose; not a source lifetime)")
+    if not split["task_payouts"]:
+        print("  none stated")
+    else:
+        for obs in split["task_payouts"]:
+            print("  %-34s %-11s %d paid / %d rejected" % (
+                str(obs["id"])[:34], str(obs["source"])[:11], obs["paid"], obs["rejected"]))
+    print("source lifetime: unknown")
+    print("")
+    print_bounties(shown, args.limit)
     print("contest filtering uses the feed's own \"N submissions\" figure; a source")
     print("that does not report one stays in, so treat the last line as an upper bound")
 
@@ -884,7 +888,7 @@ def main():
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_new)
 
-    p = sub.add_parser("reachable", help="what is actually reachable after friction and dead sources")
+    p = sub.add_parser("reachable", help="friction filter, then contest cut; payout prose stays per task")
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_reachable)
