@@ -323,6 +323,8 @@ GH_API = "https://api.github.com"
 
 def parse_issue_url(text):
     """Pull (owner, repo, number) out of a GitHub issue URL, or return None."""
+    if not isinstance(text, str):
+        return None
     marker = "github.com/"
     if marker not in text:
         return None
@@ -401,6 +403,10 @@ def merged_rate(owner, repo):
         try:
             closed = gh_get("/repos/%s/%s/pulls?state=closed&per_page=%d" % (owner, repo, size))
         except Exception as exc:      # IncompleteRead on multi-MB responses, timeouts, 5xx
+            if "GitHub 4" in str(exc):
+                # a 404 or a rate-limit answer will not improve with a smaller page;
+                # retrying it just burns quota
+                raise
             last = exc
             continue
         if not closed:

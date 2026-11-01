@@ -259,6 +259,11 @@ class TestCompetitionCheck(unittest.TestCase):
     def test_rejects_plain_text(self):
         self.assertIsNone(abf.parse_issue_url("frantic:129"))
 
+    def test_rejects_none_and_numbers(self):
+        # a feed item with "url": null used to raise TypeError here
+        self.assertIsNone(abf.parse_issue_url(None))
+        self.assertIsNone(abf.parse_issue_url(42))
+
     def test_accepts_a_link_with_an_anchor(self):
         # copied from the browser, these carry #issuecomment-...
         self.assertEqual(
@@ -282,6 +287,34 @@ class TestCompetitionCheck(unittest.TestCase):
         verdict, why = abf.judge(age_days=1, prs=0, merged=40)
         self.assertEqual(verdict, "worth a look")
         self.assertIn("0 PRs", why)
+
+    def test_a_404_is_not_retried_with_a_smaller_page(self):
+        calls = []
+        orig = abf.gh_get
+        def boom(path):
+            calls.append(path)
+            raise RuntimeError("GitHub 404 on %s: Not Found" % path)
+        abf.gh_get = boom
+        try:
+            with self.assertRaises(RuntimeError):
+                abf.merged_rate("no", "such")
+        finally:
+            abf.gh_get = orig
+        self.assertEqual(len(calls), 1)   # not three: quota is 60/hour
+
+    def test_a_transport_error_still_falls_back(self):
+        calls = []
+        orig = abf.gh_get
+        def flaky(path):
+            calls.append(path)
+            raise OSError("connection reset")
+        abf.gh_get = flaky
+        try:
+            with self.assertRaises(RuntimeError):
+                abf.merged_rate("a", "b")
+        finally:
+            abf.gh_get = orig
+        self.assertEqual(len(calls), 3)   # 100 -> 30 -> 10
 
     def test_check_without_target_says_so(self):
         import argparse
@@ -457,6 +490,46 @@ class TestPagination(unittest.TestCase):
                   "next_since": "S%d" % n} for n in range(5)]
         client = self.FakeClient(pages)
         self.assertEqual(len(abf.collect_new(client, "S0", max_pages=2)), 2)
+
+
+class TestStatelessServer(unittest.TestCase):
+    """The live server is stateless: it never issues a session id.
+
+    Every other MCP test runs against the stateful mock, so without this the branch
+    that actually matters in production would never execute.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = HTTPServer(("127.0.0.1", 0), mock_mcp.StatelessHandler)
+        cls.url = "http://127.0.0.1:%d/mcp" % cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def test_client_works_without_a_session(self):
+        client = abf.MCP(self.url)
+        client.initialize()
+        self.assertIsNone(client.session_id)
+        tools = client.list_tools()
+        self.assertEqual(len(tools), 4)
+
+    def test_call_tool_without_a_session(self):
+        client = abf.MCP(self.url)
+        client.initialize()
+        result = client.call_tool("list_bounties", {"limit": 2})
+        self.assertEqual(len(result["items"]), 2)
+
+    def test_cmd_mcp_runs_against_a_stateless_server(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.cmd_mcp(argparse.Namespace(url=self.url, tool="get_feed_stats",
+                                           arguments="{}", limit=None, json=False))
+        self.assertIn("session (none)", buf.getvalue())
 
 
 class TestGetAndNew(ServerCase):
@@ -1018,12 +1091,16 @@ class TestScale(unittest.TestCase):
         # benchmark the machine
         self.assertLess(elapsed, 5.0, "20k items took %.2fs" % elapsed)
 
-    def test_counts_are_consistent_at_scale(self):
+    def test_every_item_lands_in_exactly_one_bucket(self):
         doc = synthetic_feed(3000)
         split = abf.reachable_split(doc["items"], 50, doc["stats"]["payout_evidence"])
-        self.assertEqual(len(split["listed"]) - len(split["reachable"]),
-                         len([i for i in split["listed"] if i not in split["reachable"]]))
+        listed, reachable = split["listed"], split["reachable"]
+        alive, winnable = split["alive"], split["winnable"]
+        # each tier is a subset of the one above it, by identity
+        for outer, inner in ((listed, reachable), (reachable, alive), (alive, winnable)):
+            self.assertTrue({id(x) for x in inner} <= {id(x) for x in outer})
         self.assertGreater(len(split["dead"]), 0)   # s1 has paid_count 0
+        self.assertGreater(len(winnable), 0)
 
 
 class TestBoardConcurrency(unittest.TestCase):

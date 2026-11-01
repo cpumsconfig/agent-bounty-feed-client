@@ -44,6 +44,11 @@ def sse(obj):
 
 
 class Handler(BaseHTTPRequestHandler):
+    # The real server is stateless: it issues no Mcp-Session-Id and does not want one
+    # echoed. The default here is the stateful variant so the echo path is exercised
+    # too; StatelessHandler covers what production actually does.
+    stateful = True
+
     def log_message(self, *a):
         pass
 
@@ -69,7 +74,7 @@ class Handler(BaseHTTPRequestHandler):
         rid = msg.get("id")
 
         # every request after initialize must echo the session id
-        if method != "initialize":
+        if self.stateful and method != "initialize":
             got = self.headers.get("Mcp-Session-Id")
             if got != SESSION:
                 self.send_response(400)
@@ -85,7 +90,8 @@ class Handler(BaseHTTPRequestHandler):
             }}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Mcp-Session-Id", SESSION)
+            if self.stateful:
+                self.send_header("Mcp-Session-Id", SESSION)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -126,6 +132,12 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class StatelessHandler(Handler):
+    """No session header in, no session header out — what the live server does."""
+    stateful = False
+
+
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    handler = StatelessHandler if "--stateless" in sys.argv else Handler
+    HTTPServer(("127.0.0.1", port), handler).serve_forever()
