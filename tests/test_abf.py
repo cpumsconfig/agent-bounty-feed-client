@@ -322,6 +322,94 @@ class TestCompetitionCheck(unittest.TestCase):
         self.assertEqual(abf.rank(rows)[0]["verdict"], "worth a look")
 
 
+class TestTransportResilience(unittest.TestCase):
+    """A TLS reset mid-run used to kill the command outright."""
+
+    class _Resp:
+        status = 200
+        headers = {}
+        def read(self):
+            return b'{"ok": true}'
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+
+    def _patch(self, fail_times):
+        calls = {"n": 0}
+        orig_open, orig_sleep = abf.urllib.request.urlopen, abf.time.sleep
+        def flaky(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] <= fail_times:
+                raise OSError("connection reset")
+            return self._Resp()
+        abf.urllib.request.urlopen = flaky
+        abf.time.sleep = lambda _s: None
+        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig_open)
+        self.addCleanup(setattr, abf.time, "sleep", orig_sleep)
+        return calls
+
+    def test_retries_a_transport_error_then_succeeds(self):
+        calls = self._patch(fail_times=1)
+        status, _, body = abf.http("https://example.invalid/x")
+        self.assertEqual(status, 200)
+        self.assertEqual(calls["n"], 2)
+
+    def test_gives_up_after_three_attempts(self):
+        calls = self._patch(fail_times=99)
+        with self.assertRaises(OSError):
+            abf.http("https://example.invalid/x")
+        self.assertEqual(calls["n"], 3)
+
+    def test_http_error_is_not_retried(self):
+        calls = {"n": 0}
+        orig = abf.urllib.request.urlopen
+        def boom(req, timeout=None):
+            calls["n"] += 1
+            raise abf.urllib.error.HTTPError("u", 404, "nf", {}, None)
+        abf.urllib.request.urlopen = boom
+        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig)
+        status, _, _ = abf.http("https://example.invalid/x")
+        self.assertEqual(status, 404)
+        self.assertEqual(calls["n"], 1)
+
+
+class TestPagination(unittest.TestCase):
+
+    class FakeClient:
+        def __init__(self, pages):
+            self.pages = list(pages)
+            self.calls = []
+        def call_tool(self, name, arguments):
+            self.calls.append(dict(arguments))
+            return self.pages.pop(0)
+
+    def test_walks_every_page(self):
+        client = self.FakeClient([
+            {"items": [{"id": "a"}], "has_more": True,
+             "next_since": "S2", "next_after_id": "A2"},
+            {"items": [{"id": "b"}], "has_more": False},
+        ])
+        self.assertEqual([i["id"] for i in abf.collect_new(client, "S1")], ["a", "b"])
+        self.assertEqual(client.calls[0], {"since": "S1"})
+        self.assertEqual(client.calls[1], {"next_since": "S2", "next_after_id": "A2"})
+
+    def test_stops_when_has_more_but_no_cursor(self):
+        client = self.FakeClient([{"items": [{"id": "a"}], "has_more": True}])
+        self.assertEqual(len(abf.collect_new(client, "S1")), 1)
+
+    def test_stops_on_repeated_cursor(self):
+        page = {"items": [{"id": "a"}], "has_more": True, "next_since": "S1"}
+        client = self.FakeClient([page, dict(page), dict(page)])
+        self.assertEqual(len(abf.collect_new(client, "S1", max_pages=3)), 2)
+
+    def test_respects_max_pages(self):
+        pages = [{"items": [{"id": str(n)}], "has_more": True,
+                  "next_since": "S%d" % n} for n in range(5)]
+        client = self.FakeClient(pages)
+        self.assertEqual(len(abf.collect_new(client, "S0", max_pages=2)), 2)
+
+
 class TestGetAndNew(ServerCase):
     """cmd_get and cmd_new against the mock: the shapes they parse are the shapes
     the real server sends (item-wrapped bounty, items list), which is exactly what
@@ -569,6 +657,31 @@ class TestReachable(unittest.TestCase):
         self.assertEqual([i["id"] for i in split["alive"]], ["c", "d"])           # frantic is dead
         self.assertEqual([i["id"] for i in split["winnable"]], ["d"])             # taskmarket crowded
         self.assertEqual(split["dead"], {"frantic"})
+
+    def test_expired_items_are_not_reachable(self):
+        import datetime
+        past = (datetime.datetime.now(datetime.timezone.utc)
+                - datetime.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        feed = [{"id": "gone", "est_usd": 50, "source": "x", "requires": ["wallet_evm"],
+                 "deadline": past, "eligibility": "n/a"}]
+        split = abf.reachable_split(feed)
+        self.assertEqual(len(split["listed"]), 1)
+        self.assertEqual(split["reachable"], [])
+
+    def test_is_expired(self):
+        import datetime
+        def iso(h):
+            return (datetime.datetime.now(datetime.timezone.utc)
+                    + datetime.timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.assertTrue(abf.is_expired({"deadline": iso(-1)}))
+        self.assertFalse(abf.is_expired({"deadline": iso(1)}))
+        self.assertFalse(abf.is_expired({"deadline": None}))
+
+    def test_max_subs_threshold_is_configurable(self):
+        feed = [{"id": "c", "est_usd": 30, "source": "taskmarket", "requires": ["wallet_evm"],
+                 "eligibility": "mode=bounty; 60 submissions so far"}]
+        self.assertEqual(len(abf.reachable_split(feed, contested_at=50)["winnable"]), 0)
+        self.assertEqual(len(abf.reachable_split(feed, contested_at=100)["winnable"]), 1)
 
     def test_friction_breakdown_counts_tags(self):
         tags = dict(abf.friction_breakdown(self.FEED))

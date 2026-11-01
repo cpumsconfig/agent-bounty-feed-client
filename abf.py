@@ -33,7 +33,7 @@ TIMEOUT = 25
 
 # ---------------------------------------------------------------- transport
 
-def http(url, payload=None, headers=None, timeout=TIMEOUT):
+def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3):
     hdrs = {"User-Agent": UA}
     if headers:
         hdrs.update(headers)
@@ -43,11 +43,19 @@ def http(url, payload=None, headers=None, timeout=TIMEOUT):
         hdrs.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=body, headers=hdrs,
                                  method="POST" if body else "GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, dict(resp.headers), resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as exc:
-        return exc.code, dict(exc.headers), exc.read().decode("utf-8", "replace")
+    last = None
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, dict(resp.headers), resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            # a real answer, not a transport failure: do not retry it
+            return exc.code, dict(exc.headers), exc.read().decode("utf-8", "replace")
+        except OSError as exc:      # URLError, TLS resets, timeouts
+            last = exc
+            if attempt + 1 < attempts:
+                time.sleep(1.5 * (attempt + 1))
+    raise last
 
 
 def header(headers, name, default=""):
@@ -667,13 +675,34 @@ def cmd_get(args):
         print("note: %s" % str(note)[:220])
 
 
+def collect_new(client, since, max_pages=10):
+    """Walk get_new_bounties to exhaustion.
+
+    The tool pages: a response carries has_more plus next_since / next_after_id, and
+    stopping after the first page silently drops everything past the cut.
+    """
+    items = []
+    cursor = {"since": since}
+    for _ in range(max_pages):
+        result = client.call_tool("get_new_bounties", dict(cursor))
+        if not isinstance(result, dict):
+            break
+        items.extend(result.get("items") or [])
+        if not result.get("has_more"):
+            break
+        nxt = {k: result[k] for k in ("next_since", "next_after_id") if result.get(k)}
+        if not nxt or nxt == cursor:
+            break
+        cursor = nxt
+    return items
+
+
 def cmd_new(args):
     """Only what appeared after a timestamp: --since 6h, 2d, or an ISO string."""
     since = parse_since(args.since)
     client = MCP(args.url)
     client.initialize()
-    result = client.call_tool("get_new_bounties", {"since": since})
-    items = result.get("items", []) if isinstance(result, dict) else []
+    items = collect_new(client, since)
     items = filter_items(items, args.min_usd, args.source, args.exclude_requires,
                          args.closes_within)
     if args.json:
@@ -737,20 +766,27 @@ def submission_count(item):
     return int(match.group(1)) if match else None
 
 
-def is_contested(item):
+def is_contested(item, threshold=CONTESTED_AT):
     """A bounty with 200 entries already in is reachable in theory and lost in practice."""
     count = submission_count(item)
-    return count is not None and count >= CONTESTED_AT
+    return count is not None and count >= threshold
 
 
-def reachable_split(items):
+def is_expired(item):
+    """A deadline in the past is as unreachable as a KYC wall."""
+    left = hours_left(item.get("deadline"))
+    return left is not None and left < 0
+
+
+def reachable_split(items, contested_at=CONTESTED_AT):
     """Three numbers: everything listed, what needs no human, what survives a dead source."""
     listed = [it for it in items if amount_of(it) is not None]
-    reachable = filter_items(items, 0.0, None, FRICTION)
+    reachable = [it for it in filter_items(items, 0.0, None, FRICTION)
+                 if not is_expired(it)]
     health = source_health(items)
     dead = {s for s, st in health.items() if is_dead(st)}
     alive = [it for it in reachable if it.get("source") not in dead]
-    winnable = [it for it in alive if not is_contested(it)]
+    winnable = [it for it in alive if not is_contested(it, contested_at)]
     return {
         "listed": listed,
         "reachable": reachable,
@@ -777,7 +813,8 @@ def total_usd(items):
 def cmd_reachable(args):
     """What is actually reachable: no KYC, no stake, no dead sources."""
     items = load_feed()
-    split = reachable_split(items)
+    max_subs = getattr(args, "max_subs", CONTESTED_AT)
+    split = reachable_split(items, max_subs)
     alive = sorted(split["winnable"], key=lambda it: -(amount_of(it) or 0))
 
     if args.json:
@@ -799,14 +836,17 @@ def cmd_reachable(args):
         print(("%-10s %2d items  $%-10s %s" % (label, len(items), usd_total(total_usd(items)), note)).rstrip())
 
     tags = friction_breakdown(dropped_friction)
+    expired = [it for it in dropped_friction if is_expired(it)]
+    reasons = ["%s %d" % (t, n) for t, n in tags]
+    if expired:
+        reasons.append("expired %d" % len(expired))
     row("listed", split["listed"], "")
     row("reachable", split["reachable"],
-        "-%d  %s" % (len(dropped_friction),
-                     ", ".join("%s %d" % (t, n) for t, n in tags) or "friction"))
+        "-%d  %s" % (len(dropped_friction), ", ".join(reasons) or "friction"))
     row("alive", split["alive"],
         "-%d  never paid (%s)" % (len(dropped_dead), ", ".join(sorted(split["dead"])) or "none"))
     row("winnable", split["winnable"],
-        "-%d  crowded (%d+ submissions)" % (len(dropped_crowd), CONTESTED_AT))
+        "-%d  crowded (%d+ submissions)" % (len(dropped_crowd), max_subs))
 
     print("")
     print_bounties(alive, args.limit)
@@ -885,6 +925,8 @@ def main():
     p.set_defaults(func=cmd_new)
 
     p = sub.add_parser("reachable", help="what is actually reachable after friction and dead sources")
+    p.add_argument("--max-subs", type=int, default=CONTESTED_AT, metavar="N",
+                   help="treat N or more submissions as crowded (default %d)" % CONTESTED_AT)
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_reachable)
