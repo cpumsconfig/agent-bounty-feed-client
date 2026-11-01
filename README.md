@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 110 tests, ~1s, no network needed
+python3 abf.py selftest            # 112 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -355,14 +355,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1004 lines, 821 of them code. The transport — handshake, conditional session
+`abf.py` is 1014 lines, 829 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 110 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 112 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

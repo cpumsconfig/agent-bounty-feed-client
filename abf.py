@@ -251,7 +251,12 @@ def filter_items(items, min_usd=0.0, source=None, exclude_requires=(), closes_wi
     kept = []
     for it in items:
         amount = amount_of(it)
-        if amount is None or amount < min_usd:
+        if amount is None:
+            # unpriced is not the same as worthless: keep it unless a floor is set,
+            # in which case it cannot be shown to clear that floor
+            if min_usd > 0:
+                continue
+        elif amount < min_usd:
             continue
         if source and it.get("source") != source:
             continue
@@ -740,7 +745,9 @@ def payout_stats(eligibility):
     The feed only states a source's payout history as prose inside eligibility, so
     a client cannot sort on it without parsing. This is that parse.
     """
-    match = PAID_RE.search(eligibility or "")
+    if not isinstance(eligibility, str):
+        return None
+    match = PAID_RE.search(eligibility)
     if not match:
         return None
     return int(match.group(1)), int(match.group(2))
@@ -784,7 +791,10 @@ def task_is_dead(item):
 
 def submission_count(item):
     """'120 submissions so far' -> 120. None when the field says nothing."""
-    match = SUBS_RE.search(item.get("eligibility") or "")
+    text = item.get("eligibility")
+    if not isinstance(text, str):
+        return None
+    match = SUBS_RE.search(text)
     return int(match.group(1)) if match else None
 
 

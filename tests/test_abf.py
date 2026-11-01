@@ -540,6 +540,16 @@ class TestAmountOf(unittest.TestCase):
     def test_garbage_is_none(self):
         self.assertIsNone(abf.amount_of({"est_usd": "lots"}))
 
+    def test_unpriced_item_survives_a_zero_floor(self):
+        # regression: amount_of() made unknown prices behave like zero and vanish
+        items = [{"id": "priced", "est_usd": 5},
+                 {"id": "token", "est_usd": None, "reward": 250000, "currency": "FLAPJAX"}]
+        self.assertEqual([i["id"] for i in abf.filter_items(items, 0.0)], ["priced", "token"])
+
+    def test_unpriced_item_is_dropped_by_a_positive_floor(self):
+        items = [{"id": "token", "est_usd": None, "reward": 250000, "currency": "FLAPJAX"}]
+        self.assertEqual(abf.filter_items(items, 1.0), [])
+
     def test_the_100_usd_bounty_survives_a_min_usd_filter(self):
         item = {"id": "taskmarket:TSK-Y7YSTT0V", "est_usd": None,
                 "reward": 100.0, "currency": "OUSD"}
@@ -634,6 +644,8 @@ class TestReachable(unittest.TestCase):
     def test_payout_stats_absent(self):
         self.assertIsNone(abf.payout_stats("Stripe payout"))
         self.assertIsNone(abf.payout_stats(None))
+        self.assertIsNone(abf.payout_stats("0 paid / rejected"))   # no second number
+        self.assertIsNone(abf.payout_stats(123))                   # not a string, not a crash
 
     def test_task_is_dead_boundary(self):
         def item(elig):
