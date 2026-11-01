@@ -161,6 +161,12 @@ class TestRendering(unittest.TestCase):
         self.assertIn("$16", out)
         self.assertIn("1 item(s)", out)
 
+    def test_limit_zero_shows_nothing(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.print_bounties([{"id": "a", "est_usd": 1}], limit=0)
+        self.assertIn("no items", buf.getvalue())
+
     def test_limit_slices(self):
         buf = io.StringIO()
         rows = [{"id": "a:%d" % n, "est_usd": 1, "source": "a", "title": "t"} for n in range(5)]
@@ -244,13 +250,20 @@ class TestCompetitionCheck(unittest.TestCase):
     def test_rejects_plain_text(self):
         self.assertIsNone(abf.parse_issue_url("frantic:129"))
 
+    def test_accepts_a_link_with_an_anchor(self):
+        # copied from the browser, these carry #issuecomment-...
+        self.assertEqual(
+            abf.parse_issue_url("https://github.com/a/b/issues/7#issuecomment-123"),
+            ("a", "b", 7))
+
     def test_judge_crowded(self):
         verdict, _ = abf.judge(age_days=3, prs=98, merged=90)
         self.assertEqual(verdict, "crowded")
 
     def test_judge_stalled(self):
-        verdict, _ = abf.judge(age_days=3, prs=2, merged=0)
+        verdict, why = abf.judge(age_days=3, prs=2, merged=0)
         self.assertEqual(verdict, "stalled")
+        self.assertIn("per 100", why)   # it is a rate, not a count of the last 100
 
     def test_judge_late(self):
         verdict, _ = abf.judge(age_days=30, prs=2, merged=50)
@@ -372,6 +385,33 @@ class TestTransportResilience(unittest.TestCase):
         status, _, _ = abf.http("https://example.invalid/x")
         self.assertEqual(status, 404)
         self.assertEqual(calls["n"], 1)
+
+
+class TestRpcParsing(unittest.TestCase):
+    """A non-JSON frame or a null content block must not take the client down."""
+
+    def _client(self, body, ctype="text/event-stream"):
+        client = abf.MCP("http://example.invalid/mcp")
+        def fake_post(payload):
+            rid = payload.get("id")
+            return 200, {"Content-Type": ctype}, body.replace("{ID}", str(rid))
+        client._post = fake_post
+        return client
+
+    def test_skips_a_malformed_sse_frame(self):
+        body = chr(10).join([
+            'data: not-json',
+            '',
+            'data: {"jsonrpc":"2.0","id":{ID},"result":{"ok":true}}',
+            '',
+        ])
+        client = self._client(body)
+        self.assertEqual(client.rpc("tools/list"), {"ok": True})
+
+    def test_null_content_is_not_a_crash(self):
+        client = self._client('{"jsonrpc":"2.0","id":{ID},"result":{"content":null}}',
+                              ctype="application/json")
+        self.assertEqual(client.call_tool("x"), "")
 
 
 class TestPagination(unittest.TestCase):

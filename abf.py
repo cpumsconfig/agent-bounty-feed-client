@@ -111,7 +111,14 @@ class MCP:
             raise RuntimeError("HTTP %s on %s: %s" % (status, method, body[:300]))
 
         if "text/event-stream" in header(hdrs, "Content-Type"):
-            candidates = [json.loads(f) for f in sse_data_frames(body) if f.strip()]
+            candidates = []
+            for frame in sse_data_frames(body):
+                if not frame.strip():
+                    continue
+                try:
+                    candidates.append(json.loads(frame))
+                except ValueError:
+                    continue      # a keep-alive or non-JSON frame is not an error
         elif body.strip():
             candidates = [json.loads(body)]
         else:
@@ -150,8 +157,9 @@ class MCP:
         # older ones only ship a JSON string inside a text block
         if isinstance(result.get("structuredContent"), (dict, list)):
             return result["structuredContent"]
-        texts = [c.get("text", "") for c in result.get("content", [])
-                 if c.get("type") == "text"]
+        blocks = result.get("content") or []
+        texts = [c.get("text", "") for c in blocks
+                 if isinstance(c, dict) and c.get("type") == "text"]
         joined = "\n".join(texts).strip()
         try:
             return json.loads(joined)
@@ -241,11 +249,13 @@ def parse_since(value):
 
 
 def filter_items(items, min_usd=0.0, source=None, exclude_requires=(), closes_within=None):
-    """Keep items whose est_usd is known and >= min_usd, preserving feed order.
+    """Apply the four filters in a fixed order, preserving feed order.
 
-    exclude_requires drops any item whose requires[] intersects the list — the same
-    filter the MCP server applies server-side, done here for the endpoints that take
-    no parameters (/earn-now and feed.json are fixed snapshots).
+    An item whose price cannot be established is kept when no floor is set (unknown is
+    not zero) and dropped once a floor is, because it cannot be shown to clear it.
+
+    exclude_requires mirrors the filter the MCP server applies server-side; it is done
+    here because /earn-now and feed.json are fixed snapshots that take no parameters.
     """
     blocked = set(exclude_requires or ())
     kept = []
@@ -292,7 +302,7 @@ def parse_issue_url(text):
     parts = rest.split("/")
     if len(parts) < 4 or parts[2] != "issues":
         return None
-    owner, repo, number = parts[0], parts[1], parts[3].split("?")[0]
+    owner, repo, number = parts[0], parts[1], parts[3].split("?")[0].split("#")[0]
     if not number.isdigit():
         return None
     return owner, repo, int(number)
@@ -303,7 +313,7 @@ def judge(age_days, prs, merged):
     if prs > 10:
         return "crowded", "%d PRs already compete" % prs
     if merged < 5:
-        return "stalled", "repo merged only %d of its last 100 closed PRs" % merged
+        return "stalled", "repo merges only %d per 100 closed PRs" % merged
     if age_days > 7:
         return "late", "opened %d days ago; the field is already in" % age_days
     return "worth a look", "%d PRs, %d merged/100, %d days old" % (prs, merged, age_days)
@@ -404,7 +414,7 @@ def closes_label(value):
 
 
 def print_bounties(items, limit=None):
-    if limit:
+    if limit is not None:
         items = items[:limit]
     if not items:
         print("no items")
@@ -429,7 +439,7 @@ def cmd_earn_now(args):
     data = json.loads(body)
     items = filter_items(data.get("items", []), args.min_usd, args.source,
                          args.exclude_requires, args.closes_within)
-    if args.limit:
+    if args.limit is not None:
         items = items[:args.limit]
     if emit({"generated_at": data.get("generated_at"),
              "feed_age_minutes": data.get("feed_age_minutes"),
@@ -488,7 +498,7 @@ def cmd_feed(args):
     items = data if isinstance(data, list) else data.get("items", [])
     items = filter_items(items, args.min_usd, args.source, args.exclude_requires,
                          args.closes_within)
-    items = items[:args.top] if args.top else items
+    items = items[:args.top] if args.top is not None else items
     if emit({"count": len(items), "items": items}, args.json):
         return
     print_bounties(items)
@@ -612,7 +622,7 @@ def cmd_watch(args):
     while True:
         try:
             items = load_feed()
-        except (SystemExit, RuntimeError) as exc:
+        except Exception as exc:      # a bad body or a socket error must not end the loop
             print("[%s] feed error: %s" % (stamp(), exc))
             if args.once:
                 return
@@ -644,7 +654,8 @@ def cmd_watch(args):
 
         for it in filter_items(items, args.min_usd, args.source,
                                args.exclude_requires, args.closes_within):
-            seen.setdefault(it["id"], {"first_seen": stamp()})
+            if it.get("id"):
+                seen.setdefault(it["id"], {"first_seen": stamp()})
         save_state(args.state, state)
         first_pass = False
 
@@ -740,10 +751,10 @@ CONTESTED_AT = 50
 
 
 def payout_stats(eligibility):
-    """'0 paid / 22 rejected' -> (0, 22). None when the prose carries no numbers.
+    """'0 paid / 22 rejected' -> (0, 22). None when that sentence is absent.
 
-    The feed only states a source's payout history as prose inside eligibility, so
-    a client cannot sort on it without parsing. This is that parse.
+    The producer attaches this sentence to *one task* ("this bounty's claims so far").
+    It is not a source lifetime, and absence is unknown rather than zero — see issue #1.
     """
     if not isinstance(eligibility, str):
         return None
@@ -811,10 +822,11 @@ def is_expired(item):
 
 
 def reachable_split(items, contested_at=CONTESTED_AT, payout_evidence=None):
-    """Three numbers: everything listed, what needs no human, what survives dead evidence.
+    """Four tiers, each with its own evidence scope.
 
-    Two scopes, applied to two scopes: a source is dropped only on source-level evidence
-    (stats.payout_evidence), an item only on its own task-level claim history.
+    listed -> reachable (friction, deadline) -> alive (payout evidence) -> winnable (crowd).
+    A source is dropped only on source-level evidence (stats.payout_evidence); an item only
+    on its own task-level claim history.
     """
     listed = [it for it in items if amount_of(it) is not None]
     reachable = [it for it in filter_items(items, 0.0, None, FRICTION)
