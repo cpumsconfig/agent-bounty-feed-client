@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 131 tests, ~1s, no network needed
+python3 abf.py selftest            # 134 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -206,6 +206,13 @@ highlight/highlight#8032         $20     73      25  CROWDED      document svelt
 eight bounties. It survives individual failures: a repo that 404s or times out is reported
 as `ERROR` instead of killing the sweep.
 
+`--jobs N` checks N issues at once. It is off by default because unauthenticated GitHub
+allows 60 requests an hour and the sweep already spends three per issue:
+
+```bash
+python3 abf.py check --all --min-usd 5 --jobs 4     # 8 bounties: ~2min -> ~30s
+```
+
 It takes a bounty id from the feed, or a GitHub issue URL, and reports the three numbers
 that actually decide the answer:
 
@@ -355,14 +362,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1081 lines, 877 of them code. The transport — handshake, conditional session
+`abf.py` is 1093 lines, 886 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 131 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 134 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

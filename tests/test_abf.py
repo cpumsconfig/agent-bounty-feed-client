@@ -1026,6 +1026,65 @@ class TestScale(unittest.TestCase):
         self.assertGreater(len(split["dead"]), 0)   # s1 has paid_count 0
 
 
+class TestBoardConcurrency(unittest.TestCase):
+    """--jobs is opt-in; it must not change what the sweep reports, only how fast."""
+
+    FEED = [{"id": "x%d" % i, "url": "https://github.com/o/r%d/issues/%d" % (i, i),
+             "est_usd": 10, "title": "t%d" % i} for i in range(6)]
+
+    def _run(self, jobs):
+        import time as _time
+        orig_feed, orig_check = abf.load_feed, abf.check_issue
+
+        def slow(owner, repo, number):
+            _time.sleep(0.08)
+            return {"repo": "%s/%s" % (owner, repo), "issue": number, "title": "t",
+                    "state": "open", "created_at": "2026-10-01", "age_days": 3,
+                    "comments": 1, "prs": 2, "merged_last_100": 60, "merged_sample": 100,
+                    "merged_count": 60, "verdict": "worth a look", "why": "ok"}
+
+        abf.load_feed = lambda: self.FEED
+        abf.check_issue = slow
+        try:
+            started = _time.time()
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                abf.check_board(argparse.Namespace(
+                    all=True, target=None, min_usd=0.0, source=None, exclude_requires=(),
+                    closes_within=None, json=False, limit=10, jobs=jobs))
+            return _time.time() - started, buf.getvalue()
+        finally:
+            abf.load_feed, abf.check_issue = orig_feed, orig_check
+
+    def test_jobs_reports_the_same_rows(self):
+        _, serial = self._run(1)
+        _, parallel = self._run(6)
+        self.assertEqual(serial.split(chr(10), 1)[1], parallel.split(chr(10), 1)[1])
+
+    def test_jobs_is_faster(self):
+        serial_time, _ = self._run(1)
+        parallel_time, _ = self._run(6)
+        self.assertLess(parallel_time, serial_time * 0.6,
+                        "serial %.2fs vs parallel %.2fs" % (serial_time, parallel_time))
+
+    def test_jobs_defaults_to_serial_without_the_flag(self):
+        import time as _time
+        orig_feed, orig_check = abf.load_feed, abf.check_issue
+        abf.load_feed = lambda: self.FEED[:2]
+        abf.check_issue = lambda o, r, n: {"repo": "%s/%s" % (o, r), "issue": n, "title": "t",
+            "state": "open", "created_at": "2026-10-01", "age_days": 1, "comments": 0,
+            "prs": 0, "merged_last_100": 60, "merged_sample": 100, "merged_count": 60,
+            "verdict": "worth a look", "why": "ok"}
+        try:
+            with redirect_stdout(io.StringIO()):
+                # no jobs attribute at all, as an older caller would pass it
+                abf.check_board(argparse.Namespace(
+                    all=True, target=None, min_usd=0.0, source=None, exclude_requires=(),
+                    closes_within=None, json=False, limit=10))
+        finally:
+            abf.load_feed, abf.check_issue = orig_feed, orig_check
+
+
 class TestFixtureShape(unittest.TestCase):
     """fixtures/earn-now.sample.json is a real captured response."""
 

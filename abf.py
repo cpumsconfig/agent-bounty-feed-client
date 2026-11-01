@@ -601,8 +601,8 @@ def check_board(args):
         sys.exit("no GitHub-issue bounties matched (--min-usd %g, --source %s)"
                  % (args.min_usd, args.source or "any"))
 
-    results = []
-    for it, parsed in targets:
+    def one(pair):
+        it, parsed = pair
         try:
             row = check_issue(*parsed)
         except Exception as exc:      # one dead repo must not kill the sweep
@@ -611,7 +611,17 @@ def check_board(args):
                    "age_days": 0, "comments": 0, "prs": 0, "merged_last_100": 0,
                    "verdict": "error", "why": str(exc)[:90]}
         row["usd"] = amount_of(it)
-        results.append(row)
+        return row
+
+    jobs = max(1, getattr(args, "jobs", 1) or 1)
+    if jobs > 1 and len(targets) > 1:
+        # opt-in only: each repo costs three API calls and unauthenticated GitHub
+        # allows 60 an hour, so the default stays serial
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(jobs, len(targets))) as pool:
+            results = list(pool.map(one, targets))
+    else:
+        results = [one(p) for p in targets]
 
     results = rank(results)
     if args.json:
@@ -1017,6 +1027,8 @@ def main():
     p.add_argument("--all", action="store_true", help="triage the whole board, best first")
     add_filter_args(p)
     p.add_argument("--limit", type=int, default=10, help="max issues to check with --all")
+    p.add_argument("--jobs", type=int, default=1, metavar="N",
+                   help="check N issues in parallel (default 1; each costs 3 API calls)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_check)
 
