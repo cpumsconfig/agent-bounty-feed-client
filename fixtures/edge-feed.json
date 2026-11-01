@@ -1,0 +1,75 @@
+{
+  "generated_at": "2026-11-01T12:00:00Z",
+  "count": 13,
+  "stats": {
+    "payout_evidence": {
+      "plain": {"paid_count": 12, "paid_usd": 300.0, "basis": "fixture: pays"},
+      "deadsrc": {"paid_count": 0, "paid_usd": 0.0, "basis": "fixture: never paid"},
+      "quotedsrc": {"paid_count": "0", "paid_usd": 0.0, "basis": "fixture: quoted zero"},
+      "unknown": {"paid_count": null, "paid_usd": null, "basis": "fixture: unknown"}
+    }
+  },
+  "items": [
+    {
+      "id": "plain:1", "source": "plain", "est_usd": 40, "currency": "USD",
+      "requires": ["wallet_evm"], "deadline": "2026-12-01T00:00:00Z",
+      "eligibility": "No claim history stated.", "title": "Priced, no friction, future deadline"
+    },
+    {
+      "id": "token:1", "source": "token", "est_usd": null, "reward": 250000,
+      "currency": "FLAPJAX", "requires": ["wallet_evm"],
+      "eligibility": "Paid in FLAPJAX.", "title": "Unpriced: no USD equivalent"
+    },
+    {
+      "id": "nan:1", "source": "weird", "est_usd": "NaN", "currency": "USD",
+      "requires": ["wallet_evm"], "eligibility": "Malformed price.",
+      "title": "Price is not a finite number"
+    },
+    {
+      "id": "date:1", "source": "plain", "est_usd": 10, "currency": "USD",
+      "requires": ["wallet_evm"], "deadline": "2026-12-15",
+      "eligibility": "No claim history stated.", "title": "Deadline without a time or offset"
+    },
+    {
+      "id": "kyc:1", "source": "plain", "est_usd": 100, "currency": "USD",
+      "requires": ["kyc"], "eligibility": "Needs identity documents.",
+      "title": "Requires KYC, as a list"
+    },
+    {
+      "id": "strreq:1", "source": "plain", "est_usd": 20, "currency": "USD",
+      "requires": "kyc", "eligibility": "Needs identity documents.",
+      "title": "Requires KYC, as a comma string"
+    },
+    {
+      "id": "old:1", "source": "plain", "est_usd": 30, "currency": "USD",
+      "requires": ["wallet_evm"], "deadline": "2020-01-01T00:00:00Z",
+      "eligibility": "No claim history stated.", "title": "Deadline already passed"
+    },
+    {
+      "id": "dead:1", "source": "deadsrc", "est_usd": 50, "currency": "USD",
+      "requires": ["wallet_evm"], "eligibility": "Source has never paid.",
+      "title": "Source-level paid_count is 0"
+    },
+    {
+      "id": "quoted:1", "source": "quotedsrc", "est_usd": 50, "currency": "USD",
+      "requires": ["wallet_evm"], "eligibility": "Source has never paid.",
+      "title": "Source-level paid_count is the string \"0\""
+    },
+    {
+      "id": "taskdead:1", "source": "plain", "est_usd": 5, "currency": "USD",
+      "requires": ["wallet_evm"], "eligibility": "So far 0 paid / 60 rejected.",
+      "title": "This task has never paid anyone"
+    },
+    {
+      "id": "crowd:1", "source": "plain", "est_usd": 8, "currency": "USD",
+      "requires": ["wallet_evm"], "eligibility": "150 submissions so far.",
+      "title": "Contest is already over"
+    },
+    {
+      "source": "plain", "est_usd": 2, "currency": "USD",
+      "requires": ["wallet_evm"], "eligibility": "No claim history stated.",
+      "title": "Entry without an id"
+    },
+    null
+  ]
+}

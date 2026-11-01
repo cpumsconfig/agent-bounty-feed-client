@@ -886,6 +886,83 @@ class TestWatchLoop(unittest.TestCase):
         self.assertIn("$100", out)
 
 
+class TestEdgeFeed(unittest.TestCase):
+    """One fixture with every malformed shape the feed can plausibly emit.
+
+    fixtures/edge-feed.json holds 13 entries: unpriced, NaN price, naive deadline,
+    requires as a list and as a comma string, expired, a dead source, a source whose
+    paid_count is the string "0", a task-level zero-paid record, a crowded contest,
+    an entry with no id, and a null.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(ROOT, "fixtures", "edge-feed.json")
+        with open(path, encoding="utf-8") as fh:
+            cls.doc = json.load(fh)
+
+    def split(self, **kwargs):
+        stats = self.doc.get("stats") or {}
+        return abf.reachable_split(self.doc["items"], payout_evidence=stats.get("payout_evidence"))
+
+    def test_tiers_nest_and_match_the_fixture(self):
+        split = self.split()
+        self.assertEqual(len(split["listed"]), 10)
+        self.assertEqual(len(split["reachable"]), 7)
+        self.assertEqual(len(split["alive"]), 4)
+        self.assertEqual(len(split["winnable"]), 3)
+        for outer, inner in (("listed", "reachable"), ("reachable", "alive"), ("alive", "winnable")):
+            self.assertLessEqual(len(split[inner]), len(split[outer]), "%s > %s" % (inner, outer))
+
+    def test_string_requires_is_honoured(self):
+        ids = {i.get("id") for i in self.split()["reachable"]}
+        self.assertNotIn("kyc:1", ids)      # requires: ["kyc"]
+        self.assertNotIn("strreq:1", ids)   # requires: "kyc"
+
+    def test_quoted_zero_still_counts_as_dead(self):
+        split = self.split()
+        self.assertIn("deadsrc", split["dead"])
+        self.assertIn("quotedsrc", split["dead"])   # paid_count is the string "0"
+
+    def test_unpriced_and_nan_are_not_listed(self):
+        ids = {i.get("id") for i in self.split()["listed"]}
+        self.assertNotIn("token:1", ids)
+        self.assertNotIn("nan:1", ids)
+
+    def test_task_level_zero_paid_is_dropped_alone(self):
+        ids = {i.get("id") for i in self.split()["alive"]}
+        self.assertNotIn("taskdead:1", ids)
+        self.assertIn("plain:1", ids)      # same source, different task
+
+    def test_naive_deadline_renders(self):
+        self.assertTrue(abf.closes_label("2026-12-15").endswith("d"))
+
+    def test_table_survives_null_and_missing_id(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.print_bounties(self.doc["items"])
+        out = buf.getvalue()
+        self.assertIn("plain:1", out)
+        self.assertIn("token:1", out)          # unpriced row still renders, as an em dash
+        self.assertIn("—", out)
+        self.assertIn("12 item(s)", out)       # the null entry is skipped, not counted
+
+    def test_reachable_json_on_the_edge_feed(self):
+        import argparse
+        orig = abf.load_feed_doc
+        abf.load_feed_doc = lambda: self.doc
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                abf.cmd_reachable(argparse.Namespace(limit=None, max_subs=50, json=True))
+        finally:
+            abf.load_feed_doc = orig
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["winnable"]["count"], 3)
+        self.assertEqual(payload["winnable"]["usd"], 52.0)
+        self.assertEqual(sorted(payload["dead_sources"]), ["deadsrc", "quotedsrc"])
+
+
 class TestFixtureShape(unittest.TestCase):
     """fixtures/earn-now.sample.json is a real captured response."""
 

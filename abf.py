@@ -222,6 +222,16 @@ def amount_of(item):
     return value if math.isfinite(value) else None
 
 
+def requires_of(item):
+    """The item's requirement tags, tolerating a comma string where a list is expected."""
+    value = item.get("requires")
+    if isinstance(value, str):
+        return tuple(p.strip().lower() for p in value.split(",") if p.strip())
+    if isinstance(value, (list, tuple)):
+        return tuple(str(v).strip().lower() for v in value if v)
+    return ()
+
+
 def parse_requires(value):
     """'kyc, stake' -> ('kyc', 'stake'). None or '' -> ()."""
     if not value:
@@ -234,9 +244,14 @@ def parse_deadline(value):
     if not value:
         return None
     try:
-        return datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        stamp = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
+    # "2026-11-12" parses as naive; subtracting it from an aware now() raises, so
+    # treat a missing offset as UTC rather than crashing the whole table
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=datetime.timezone.utc)
+    return stamp
 
 
 def hours_left(value):
@@ -283,7 +298,7 @@ def filter_items(items, min_usd=0.0, source=None, exclude_requires=(), closes_wi
             continue
         if source and it.get("source") != source:
             continue
-        if blocked and blocked & set(it.get("requires") or ()):
+        if blocked and blocked & set(requires_of(it)):
             continue
         if closes_within is not None:
             left = hours_left(it.get("deadline"))
@@ -445,9 +460,11 @@ def print_bounties(items, limit=None):
         return
     print("%-34s %7s  %-11s %-7s %s" % ("ID", "USD", "SOURCE", "CLOSES", "TITLE"))
     print("-" * 108)
+    shown = 0
     for it in items:
         if not isinstance(it, dict):
             continue
+        shown += 1
         print("%-34s %7s  %-11s %-7s %s" % (
             str(it.get("id", ""))[:34],
             money(amount_of(it)),
@@ -456,7 +473,7 @@ def print_bounties(items, limit=None):
             str(it.get("title", ""))[:50],
         ))
     print("")
-    print("%d item(s)" % len(items))
+    print("%d item(s)" % shown)
 
 def cmd_earn_now(args):
     status, _, body = http(BASE + "/earn-now")
@@ -805,6 +822,8 @@ def board_health(payout_evidence):
         if not isinstance(entry, dict):
             continue
         paid = entry.get("paid_count")
+        if isinstance(paid, str) and paid.strip().isdigit():
+            paid = int(paid)      # the feed has been seen to quote numbers
         health[source] = {
             "paid": paid,
             "usd": entry.get("paid_usd"),
@@ -856,8 +875,10 @@ def reachable_split(items, contested_at=CONTESTED_AT, payout_evidence=None):
     A source is dropped only on source-level evidence (stats.payout_evidence); an item only
     on its own task-level claim history.
     """
-    listed = [it for it in items if amount_of(it) is not None]
-    reachable = [it for it in filter_items(items, 0.0, None, FRICTION)
+    # the tiers must nest: reachable is a subset of listed, not a parallel set,
+    # otherwise the "-N" arithmetic in the output goes negative
+    listed = [it for it in items if isinstance(it, dict) and amount_of(it) is not None]
+    reachable = [it for it in filter_items(listed, 0.0, None, FRICTION)
                  if not is_expired(it)]
     health = board_health(payout_evidence)
     dead = {s for s, entry in health.items() if source_is_dead(entry)}
@@ -878,7 +899,7 @@ def friction_breakdown(items):
     """How many items each friction tag is responsible for, most common first."""
     counts = {}
     for it in items:
-        for tag in sorted(set(it.get("requires") or ()) & set(FRICTION)):
+        for tag in sorted(set(requires_of(it)) & set(FRICTION)):
             counts[tag] = counts.get(tag, 0) + 1
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
@@ -892,7 +913,9 @@ def cmd_reachable(args):
     doc = load_feed_doc()
     items = doc.get("items", [])
     max_subs = getattr(args, "max_subs", CONTESTED_AT)
-    evidence = (doc.get("stats") or {}).get("payout_evidence") or {}
+    stats = doc.get("stats")
+    evidence = stats.get("payout_evidence") if isinstance(stats, dict) else {}
+    evidence = evidence if isinstance(evidence, dict) else {}
     split = reachable_split(items, max_subs, evidence)
     alive = sorted(split["winnable"], key=lambda it: -(amount_of(it) or 0))
 

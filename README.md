@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 120 tests, ~1s, no network needed
+python3 abf.py selftest            # 128 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -355,14 +355,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1054 lines, 857 of them code. The transport — handshake, conditional session
+`abf.py` is 1077 lines, 874 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 120 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 128 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 
@@ -380,6 +380,12 @@ Run the same suite directly if you prefer unittest:
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+`fixtures/edge-feed.json` is the adversarial one: unpriced, NaN price, naive deadline,
+`requires` as a list and as a comma string, expired, a dead source, a source whose
+`paid_count` is the string `"0"`, a task-level zero-paid record, a crowded contest, an
+entry with no id, and a null. Nine of the twelve assertions in `TestEdgeFeed` exist
+because that file found a bug.
 
 `fixtures/earn-now.sample.json` is a real captured `/earn-now` response from
 2026-10-30, kept so the parser and the table renderer can be exercised offline.
