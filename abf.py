@@ -16,6 +16,7 @@ no venv, no version conflicts.
 import argparse
 import datetime
 import json
+import math
 import os
 import re
 import sys
@@ -43,6 +44,7 @@ def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3):
         hdrs.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=body, headers=hdrs,
                                  method="POST" if body else "GET")
+    # Retrying a POST is only safe because every call this client makes is read-only.
     last = None
     for attempt in range(attempts):
         try:
@@ -91,6 +93,8 @@ class MCP:
 
     def _post(self, payload):
         headers = {"Accept": "application/json, text/event-stream"}
+        # Echo the session only if the server issued one. Stateless servers never do,
+        # and sending a made-up header is what breaks clients against them.
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         status, hdrs, body = http(self.url, payload, headers)
@@ -175,6 +179,8 @@ def money(value):
         amount = float(value)
     except (TypeError, ValueError):
         return "—"
+    if not math.isfinite(amount):
+        return "—"
     if amount >= 1000000:
         return "$%.1fM" % (amount / 1000000.0)
     return "$%g" % amount
@@ -185,6 +191,8 @@ def usd_total(value):
     try:
         amount = round(float(value), 2)
     except (TypeError, ValueError):
+        return "0"
+    if not math.isfinite(amount):
         return "0"
     text = "{:,}".format(amount)
     return text.rstrip("0").rstrip(".") if "." in text else text
@@ -206,9 +214,12 @@ def amount_of(item):
     if raw is None and str(item.get("currency", "")).upper() in USD_LIKE:
         raw = item.get("reward")
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
         return None
+    # nan/inf compare false against every threshold, so they would slip through
+    # --min-usd and poison every total; treat them as unknown
+    return value if math.isfinite(value) else None
 
 
 def parse_requires(value):
@@ -260,6 +271,8 @@ def filter_items(items, min_usd=0.0, source=None, exclude_requires=(), closes_wi
     blocked = set(exclude_requires or ())
     kept = []
     for it in items:
+        if not isinstance(it, dict):
+            continue
         amount = amount_of(it)
         if amount is None:
             # unpriced is not the same as worthless: keep it unless a floor is set,
@@ -305,11 +318,22 @@ def parse_issue_url(text):
     owner, repo, number = parts[0], parts[1], parts[3].split("?")[0].split("#")[0]
     if not number.isdigit():
         return None
+    # these two go straight into an API path; keep them to what GitHub allows
+    for part in (owner, repo):
+        # dots are legal in repo names (owner.github.io), so reject dot-only parts
+        # explicitly rather than relying on the character class
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", part) or not re.search(r"[A-Za-z0-9]", part):
+            return None
     return owner, repo, int(number)
 
 
 def judge(age_days, prs, merged):
-    """Turn three numbers into a verdict. Pure, so it is cheap to test."""
+    """Turn three numbers into a verdict. Pure, so it is cheap to test.
+
+    Thresholds come from what the board actually looked like: the busiest issues carry
+    90-120 PRs, repos that still merge sit well above 5 per 100, and a week is roughly
+    when a bounty's first PRs land.
+    """
     if prs > 10:
         return "crowded", "%d PRs already compete" % prs
     if merged < 5:
@@ -422,6 +446,8 @@ def print_bounties(items, limit=None):
     print("%-34s %7s  %-11s %-7s %s" % ("ID", "USD", "SOURCE", "CLOSES", "TITLE"))
     print("-" * 108)
     for it in items:
+        if not isinstance(it, dict):
+            continue
         print("%-34s %7s  %-11s %-7s %s" % (
             str(it.get("id", ""))[:34],
             money(amount_of(it)),
@@ -617,6 +643,8 @@ def cmd_watch(args):
 
     state = load_state(args.state)
     seen = state.setdefault("seen", {})
+    # A first run records the board instead of reporting it, so a restart does not
+    # replay every listing as "new".
     first_pass = not seen
 
     while True:
@@ -856,7 +884,7 @@ def friction_breakdown(items):
 
 
 def total_usd(items):
-    return sum(amount_of(it) or 0 for it in items)
+    return sum(amount_of(it) or 0 for it in items if isinstance(it, dict))
 
 
 def cmd_reachable(args):

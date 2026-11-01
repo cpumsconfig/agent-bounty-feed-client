@@ -244,6 +244,14 @@ class TestCompetitionCheck(unittest.TestCase):
     def test_rejects_pull_urls(self):
         self.assertIsNone(abf.parse_issue_url("https://github.com/a/b/pull/7"))
 
+    def test_rejects_dot_only_owner(self):
+        self.assertIsNone(abf.parse_issue_url("https://github.com/../x/issues/1"))
+
+    def test_accepts_a_dotted_repo_name(self):
+        self.assertEqual(
+            abf.parse_issue_url("https://github.com/cpumsconfig/cpumsconfig.github.io/issues/3"),
+            ("cpumsconfig", "cpumsconfig.github.io", 3))
+
     def test_rejects_non_numeric(self):
         self.assertIsNone(abf.parse_issue_url("https://github.com/a/b/issues/abc"))
 
@@ -579,6 +587,16 @@ class TestAmountOf(unittest.TestCase):
 
     def test_garbage_is_none(self):
         self.assertIsNone(abf.amount_of({"est_usd": "lots"}))
+
+    def test_nan_is_not_a_price(self):
+        # nan compares false against every threshold, so it would pass --min-usd
+        self.assertIsNone(abf.amount_of({"est_usd": float("nan")}))
+        self.assertEqual(abf.filter_items([{"id": "n", "est_usd": float("nan")}], 5), [])
+        self.assertEqual(abf.money(float("nan")), "—")
+
+    def test_non_dict_item_is_skipped(self):
+        items = [None, "oops", {"id": "ok", "est_usd": 1}]
+        self.assertEqual([i["id"] for i in abf.filter_items(items, 0)], ["ok"])
 
     def test_unpriced_item_survives_a_zero_floor(self):
         # regression: amount_of() made unknown prices behave like zero and vanish
