@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 104 tests, ~1s, no network needed
+python3 abf.py selftest            # 110 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -297,8 +297,8 @@ $ python3 abf.py reachable
 
 listed     25 items  $50,717.6
 reachable  14 items  $263.6      -11  kyc 9, purchase 1, expired 1
-alive      10 items  $233.6      -4  never paid (frantic)
-winnable    7 items  $131.6      -3  crowded (50+ submissions)
+alive      12 items  $239.6      -2  task shows 0 paid
+winnable    9 items  $137.6      -3  crowded (50+ submissions)
 
 dead sources
   frantic     0 paid / 20 rejected
@@ -309,10 +309,15 @@ Each tier comes from a field the feed already carries:
 | Tier | Rule |
 |---|---|
 | reachable | drops any item whose `requires` names a friction requirement, or whose deadline has passed |
-| alive | drops sources whose `eligibility` reports `0 paid / N rejected` with N > 10 |
+| alive | drops a *task* whose own `eligibility` reports `0 paid / N rejected` (N > 10); a whole *source* only when `stats.payout_evidence` says `paid_count: 0` |
 | winnable | drops items whose `eligibility` reports 50+ `submissions` |
 
-`--max-subs N` moves the crowded threshold (default 50). The third tier is an upper bound, not a promise: a source that does not report its submission
+`--max-subs N` moves the crowded threshold (default 50). The two scopes are kept apart on purpose. `N paid / M rejected` inside an item is about
+*that task*; the only source-scoped number in the feed is `stats.payout_evidence`, which
+carries its own `basis`. Promoting a task sentence to a source verdict made the result depend
+on which task happened to be listed first — see issue #1.
+
+The third tier is an upper bound, not a promise: a source that does not report its submission
 count stays in, and the tool says so on its last line. `--json` returns all four counts.
 
 ## Two transport details worth knowing
@@ -350,14 +355,14 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 971 lines, 794 of them code. The transport — handshake, conditional session
+`abf.py` is 1004 lines, 821 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 104 tests
+`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port and runs 110 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

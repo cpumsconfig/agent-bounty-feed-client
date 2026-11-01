@@ -106,9 +106,9 @@ arakoodev/EdgeChains#273               $30    116      32  CROWDED      BOUNTY: 
 <pre><code>$ python3 abf.py reachable
 
 listed     25 items  $50,717.6
-reachable  15 items  $264.6      -10  kyc 9, purchase 1
-alive      11 items  $234.6      -4  never paid (frantic)
-winnable    7 items  $131.6      -4  crowded (50+ submissions)</code></pre>
+reachable  14 items  $263.6      -11  kyc 9, purchase 1, expired 1
+alive      12 items  $239.6      -2  task shows 0 paid
+winnable    9 items  $137.6      -3  crowded (50+ submissions)</code></pre>
 <p class="muted">Every tier is parsed from a field the feed already carries: <code>requires</code>, the <code>0 paid / N rejected</code> prose inside <code>eligibility</code>, and its <code>N submissions</code> count. That prose is the part a client cannot sort on until someone parses it — which is why the last line is an upper bound, not a promise, and the tool says so.</p>
 
 <h2>Filter out work you cannot start</h2>

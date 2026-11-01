@@ -325,12 +325,19 @@ def rank(results):
     return sorted(results, key=lambda r: (VERDICT_RANK.get(r["verdict"], 9), r.get("prs", 0)))
 
 
-def load_feed():
+def load_feed_doc():
+    """The whole feed document, so callers can reach stats.payout_evidence too."""
     status, _, body = http(FEED_JSON)
     if status != 200:
         sys.exit("feed.json returned HTTP %s" % status)
     data = json.loads(body)
-    return data if isinstance(data, list) else data.get("items", [])
+    if isinstance(data, list):
+        return {"items": data, "stats": {}}
+    return data
+
+
+def load_feed():
+    return load_feed_doc().get("items", [])
 
 
 def merged_rate(owner, repo):
@@ -739,21 +746,36 @@ def payout_stats(eligibility):
     return int(match.group(1)), int(match.group(2))
 
 
-def source_health(items):
-    """First paid/rejected claim seen per source. Sources with no claim are absent."""
+def board_health(payout_evidence):
+    """Source-level payout counts, as the feed states them, with their stated basis.
+
+    This is the only source-scoped number in the feed. The `N paid / M rejected` sentence
+    inside an item's eligibility is about *that task*, not about the source, so it must
+    never be promoted to a source-wide verdict: doing that made the result depend on which
+    task happened to appear first in feed order.
+    """
     health = {}
-    for it in items:
-        source = it.get("source")
-        if source in health:
+    for source, entry in (payout_evidence or {}).items():
+        if not isinstance(entry, dict):
             continue
-        stats = payout_stats(it.get("eligibility"))
-        if stats:
-            health[source] = stats
+        paid = entry.get("paid_count")
+        health[source] = {
+            "paid": paid,
+            "usd": entry.get("paid_usd"),
+            "basis": entry.get("basis"),
+            "known": paid is not None,
+        }
     return health
 
 
-def is_dead(stats):
-    """A source that has never paid and rejects a lot is a filter, not a slow start."""
+def source_is_dead(entry):
+    """Only an explicit zero at source scope counts. Unknown is not dead."""
+    return bool(entry) and entry.get("paid") == 0
+
+
+def task_is_dead(item):
+    """This task's own claim history: zero paid with a meaningful number of rejections."""
+    stats = payout_stats(item.get("eligibility"))
     if not stats:
         return False
     paid, rejected = stats
@@ -778,14 +800,19 @@ def is_expired(item):
     return left is not None and left < 0
 
 
-def reachable_split(items, contested_at=CONTESTED_AT):
-    """Three numbers: everything listed, what needs no human, what survives a dead source."""
+def reachable_split(items, contested_at=CONTESTED_AT, payout_evidence=None):
+    """Three numbers: everything listed, what needs no human, what survives dead evidence.
+
+    Two scopes, applied to two scopes: a source is dropped only on source-level evidence
+    (stats.payout_evidence), an item only on its own task-level claim history.
+    """
     listed = [it for it in items if amount_of(it) is not None]
     reachable = [it for it in filter_items(items, 0.0, None, FRICTION)
                  if not is_expired(it)]
-    health = source_health(items)
-    dead = {s for s, st in health.items() if is_dead(st)}
-    alive = [it for it in reachable if it.get("source") not in dead]
+    health = board_health(payout_evidence)
+    dead = {s for s, entry in health.items() if source_is_dead(entry)}
+    alive = [it for it in reachable
+             if it.get("source") not in dead and not task_is_dead(it)]
     winnable = [it for it in alive if not is_contested(it, contested_at)]
     return {
         "listed": listed,
@@ -812,9 +839,11 @@ def total_usd(items):
 
 def cmd_reachable(args):
     """What is actually reachable: no KYC, no stake, no dead sources."""
-    items = load_feed()
+    doc = load_feed_doc()
+    items = doc.get("items", [])
     max_subs = getattr(args, "max_subs", CONTESTED_AT)
-    split = reachable_split(items, max_subs)
+    evidence = (doc.get("stats") or {}).get("payout_evidence") or {}
+    split = reachable_split(items, max_subs, evidence)
     alive = sorted(split["winnable"], key=lambda it: -(amount_of(it) or 0))
 
     if args.json:
@@ -824,6 +853,7 @@ def cmd_reachable(args):
             "alive": {"count": len(split["alive"]), "usd": total_usd(split["alive"])},
             "winnable": {"count": len(alive), "usd": total_usd(alive)},
             "dead_sources": sorted(split["dead"]),
+            "payout_evidence": split["health"],
             "items": alive,
         }, True)
         return
@@ -843,8 +873,11 @@ def cmd_reachable(args):
     row("listed", split["listed"], "")
     row("reachable", split["reachable"],
         "-%d  %s" % (len(dropped_friction), ", ".join(reasons) or "friction"))
+    dead_sources = ", ".join(sorted(split["dead"])) or "none"
     row("alive", split["alive"],
-        "-%d  never paid (%s)" % (len(dropped_dead), ", ".join(sorted(split["dead"])) or "none"))
+        "-%d  task shows 0 paid%s" % (
+            len(dropped_dead),
+            "; dead source: " + dead_sources if split["dead"] else ""))
     row("winnable", split["winnable"],
         "-%d  crowded (%d+ submissions)" % (len(dropped_crowd), max_subs))
 

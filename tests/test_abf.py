@@ -635,11 +635,26 @@ class TestReachable(unittest.TestCase):
         self.assertIsNone(abf.payout_stats("Stripe payout"))
         self.assertIsNone(abf.payout_stats(None))
 
-    def test_is_dead_boundary(self):
-        self.assertFalse(abf.is_dead((0, 10)))
-        self.assertTrue(abf.is_dead((0, 11)))
-        self.assertFalse(abf.is_dead((1, 500)))
-        self.assertFalse(abf.is_dead(None))
+    def test_task_is_dead_boundary(self):
+        def item(elig):
+            return {"eligibility": elig}
+        self.assertFalse(abf.task_is_dead(item("0 paid / 10 rejected")))
+        self.assertTrue(abf.task_is_dead(item("0 paid / 11 rejected")))
+        self.assertFalse(abf.task_is_dead(item("1 paid / 500 rejected")))
+        self.assertFalse(abf.task_is_dead(item("no numbers here")))
+
+    def test_source_is_dead_needs_an_explicit_zero(self):
+        self.assertTrue(abf.source_is_dead({"paid": 0}))
+        self.assertFalse(abf.source_is_dead({"paid": 22}))
+        self.assertFalse(abf.source_is_dead({"paid": None}))   # unknown is not dead
+        self.assertFalse(abf.source_is_dead(None))
+
+    def test_board_health_keeps_basis(self):
+        health = abf.board_health({"frantic": {"paid_count": 22, "paid_usd": 66.0,
+                                               "basis": "claims on listed bounties"}})
+        self.assertEqual(health["frantic"]["paid"], 22)
+        self.assertTrue(health["frantic"]["known"])
+        self.assertIn("listed", health["frantic"]["basis"])
 
     def test_submission_count(self):
         self.assertEqual(abf.submission_count({"eligibility": "120 submissions so far"}), 120)
@@ -654,9 +669,47 @@ class TestReachable(unittest.TestCase):
         split = abf.reachable_split(self.FEED)
         self.assertEqual(len(split["listed"]), 4)
         self.assertEqual([i["id"] for i in split["reachable"]], ["b", "c", "d"])   # a needs kyc
-        self.assertEqual([i["id"] for i in split["alive"]], ["c", "d"])           # frantic is dead
+        self.assertEqual([i["id"] for i in split["alive"]], ["c", "d"])           # b's own task is dead
         self.assertEqual([i["id"] for i in split["winnable"]], ["d"])             # taskmarket crowded
-        self.assertEqual(split["dead"], {"frantic"})
+        self.assertEqual(split["dead"], set())   # no source-level evidence was supplied
+
+    # --- regressions for the scope bug reported in issue #1 -----------------
+
+    def test_item_order_does_not_change_the_verdict(self):
+        """The bug: whichever task appeared first decided the fate of the whole source."""
+        items = [
+            {"id": "zero", "est_usd": 3, "source": "frantic", "requires": ["wallet_evm"],
+             "eligibility": "So far 0 paid / 55 rejected."},
+            {"id": "paid", "est_usd": 3, "source": "frantic", "requires": ["wallet_evm"],
+             "eligibility": "So far 20 paid / 55 rejected."},
+        ]
+        forward = [i["id"] for i in abf.reachable_split(items)["alive"]]
+        backward = [i["id"] for i in abf.reachable_split(list(reversed(items)))["alive"]]
+        self.assertEqual(forward, ["paid"])
+        self.assertEqual(backward, ["paid"])
+
+    def test_mixed_payouts_keep_the_paying_task(self):
+        items = [
+            {"id": "dead", "est_usd": 3, "source": "s", "requires": ["wallet_evm"],
+             "eligibility": "0 paid / 40 rejected"},
+            {"id": "alive", "est_usd": 3, "source": "s", "requires": ["wallet_evm"],
+             "eligibility": "20 paid / 57 rejected"},
+        ]
+        self.assertEqual([i["id"] for i in abf.reachable_split(items)["alive"]], ["alive"])
+
+    def test_missing_history_is_unknown_not_dead(self):
+        items = [{"id": "x", "est_usd": 9, "source": "direct", "requires": ["wallet_evm"],
+                  "eligibility": "Single winner."}]
+        split = abf.reachable_split(items, payout_evidence={"direct": {"paid_count": None}})
+        self.assertEqual([i["id"] for i in split["alive"]], ["x"])
+        self.assertEqual(split["dead"], set())
+
+    def test_source_level_zero_drops_the_whole_source(self):
+        items = [{"id": "x", "est_usd": 9, "source": "bad", "requires": ["wallet_evm"],
+                  "eligibility": "20 paid / 5 rejected"}]
+        split = abf.reachable_split(items, payout_evidence={"bad": {"paid_count": 0}})
+        self.assertEqual(split["alive"], [])
+        self.assertEqual(split["dead"], {"bad"})
 
     def test_expired_items_are_not_reachable(self):
         import datetime
@@ -698,18 +751,18 @@ class TestReachable(unittest.TestCase):
 
     def test_json_shape(self):
         import argparse
-        orig = abf.load_feed
-        abf.load_feed = lambda: self.FEED
+        orig = abf.load_feed_doc
+        abf.load_feed_doc = lambda: {"items": self.FEED, "stats": {}}
         try:
             buf = io.StringIO()
             with redirect_stdout(buf):
                 abf.cmd_reachable(argparse.Namespace(limit=None, json=True))
         finally:
-            abf.load_feed = orig
+            abf.load_feed_doc = orig
         payload = json.loads(buf.getvalue())
         self.assertEqual(payload["listed"]["usd"], 100.0)
         self.assertEqual(payload["winnable"]["usd"], 40.0)
-        self.assertEqual(payload["dead_sources"], ["frantic"])
+        self.assertEqual(payload["dead_sources"], [])
 
 
 class TestWatchLoop(unittest.TestCase):
