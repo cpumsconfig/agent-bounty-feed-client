@@ -1202,8 +1202,10 @@ class TestBoardConcurrency(unittest.TestCase):
         self.assertEqual(serial.split(chr(10), 1)[1], parallel.split(chr(10), 1)[1])
 
     def test_jobs_is_faster(self):
-        serial_time, _ = self._run(1)
-        parallel_time, _ = self._run(6)
+        # best of two each: a single sample on a loaded machine is noise, and this is the
+        # one assertion in the suite whose result depends on wall-clock time
+        serial_time = min(self._run(1)[0] for _ in range(2))
+        parallel_time = min(self._run(6)[0] for _ in range(2))
         self.assertLess(parallel_time, serial_time * 0.6,
                         "serial %.2fs vs parallel %.2fs" % (serial_time, parallel_time))
 
@@ -2063,6 +2065,31 @@ class TestPooledRewards(unittest.TestCase):
     def test_reachable_counts_the_pooled_share(self):
         out = self._reachable([self.POOL, self.SINGLE])
         self.assertIn("is a pool split between winners", out)
+
+    def test_an_audit_contest_counts_as_a_pool(self):
+        # reward_basis is absent on audit contests; kind is the only tell, and it is the
+        # single biggest number on the board
+        contest = {"id": "c", "est_usd": 50000, "kind": "audit_contest", "source": "s"}
+        self.assertTrue(abf.is_pooled(contest))
+        self.assertTrue(abf.is_pooled({"kind": "AUDIT_CONTEST"}))
+        self.assertFalse(abf.is_pooled({"kind": "bounty"}))
+
+    def test_the_listed_row_names_the_audit_contest_share(self):
+        contest = {"id": "c", "est_usd": 50000, "kind": "audit_contest",
+                   "source": "s", "requires": ["kyc"]}
+        small = {"id": "b", "est_usd": 10, "source": "s"}
+        out = self._reachable([contest, small])
+        self.assertIn("of that is 1 audit contest", out)
+        self.assertIn("$50,000", out)
+
+    def test_json_breaks_the_audit_contest_out_of_listed(self):
+        contest = {"id": "c", "est_usd": 50000, "kind": "audit_contest",
+                   "source": "s", "requires": ["kyc"]}
+        payload = json.loads(self._reachable([contest, {"id": "b", "est_usd": 10,
+                                                        "source": "s"}], as_json=True))
+        self.assertEqual(payload["listed"]["usd"], 50010.0)
+        self.assertEqual(payload["listed"]["audit_contests"],
+                         {"count": 1, "usd": 50000.0})
 
     def test_json_separates_pooled_from_the_total(self):
         payload = json.loads(self._reachable([self.POOL, self.SINGLE], as_json=True))

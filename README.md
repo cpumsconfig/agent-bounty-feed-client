@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 216 tests, ~2s, network is blocked, not just unused
+python3 abf.py selftest            # 219 tests, ~2s, network is blocked, not just unused
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -378,6 +378,19 @@ footnote says what the mark means, and `--json` reports `pooled: {count, usd}` s
 so a caller can subtract it if it wants to. The total is not silently adjusted: changing a
 number is a worse failure than annotating one.
 
+`kind: audit_contest` is the same thing at a much larger scale, and it is the number that
+makes the board look rich. On one snapshot, **$50,000 of a $50,717.6 total was a single audit
+contest** whose own eligibility reads "the prize pool is split among valid findings, so most
+entrants earn little or nothing". The feed's own `total_open_usd_equiv` says $617.60, because
+it counts only `kind: bounty`. So the first line now carries the split:
+
+```
+listed     25 items  $50,717.6   $50,000 of that is 1 audit contest(s), a pool split among findings
+```
+
+and `--json` gives `listed.audit_contests: {count, usd}`. Audit contests have no
+`reward_basis`, so `kind` is the only tell — worth knowing if you parse this feed yourself.
+
 ## Two transport details worth knowing
 
 **Retries.** A TLS reset used to kill a command outright. `http()` now retries a transport
@@ -413,7 +426,7 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1446 lines, 1172 of them code. The transport — handshake, conditional session
+`abf.py` is 1461 lines, 1184 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
@@ -424,7 +437,7 @@ echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one si
 non-loopback address, so "no network" is enforced rather than promised: a test that
 strays out gets an AssertionError naming the address in milliseconds instead of a
 slow, flaky pass. It boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
-stateful (issues and requires a session id) and stateless (what the live server does) and runs 216 tests
+stateful (issues and requires a session id) and stateless (what the live server does) and runs 219 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

@@ -119,6 +119,8 @@ winnable    8 items  $12.6       -1  crowded (50+ submissions)
 reachable   4 items  $0.6        -21  agent_account 13, kyc 9, purchase 1, expired 4, tags overlap</code></pre>
 <p class="muted">$12.60 or $0.60, depending on a definition nobody writes down. The tool prints both, and says which one it used in <code>--json</code>, because a number whose assumptions are hidden is worse than no number.</p>
 <p>One more assumption is visible in the data and easy to miss: <code>reward_basis</code>. When it says <code>shared_pool</code> or <code>ranked_prizes</code>, <code>est_usd</code> is the whole pot, not what one worker receives — and <code>per_worker_usd</code> is null, so the real share is not recoverable from the feed. Those rows are marked <code>*</code> rather than silently adjusted.</p>
+<p>That same trap is what makes the board look rich. On one snapshot <strong>$50,000 of a $50,717.6 total was a single audit contest</strong> — whose own eligibility says "the prize pool is split among valid findings, so most entrants earn little or nothing". The feed's own headline total is $617.60, because it counts only <code>kind: bounty</code>. So the first line names the split instead of hiding it:</p>
+<pre><code>listed     25 items  $50,717.6   $50,000 of that is 1 audit contest(s), a pool split among findings</code></pre>
 
 <h2>Filter out work you cannot start</h2>
 <p>Half of any board needs KYC, a stake, a bond, a purchase, or a human. One flag removes all of it — on the current board, 25 listings become 15:</p>

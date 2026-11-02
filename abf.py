@@ -246,6 +246,10 @@ def is_pooled(item):
     `shared_pool` and `ranked_prizes` both report the total; per_worker_usd is null in
     the feed, so the per-worker figure cannot be recovered — only flagged.
     """
+    if str(item.get("kind") or "").lower() == "audit_contest":
+        # its own eligibility says "the prize pool is split among valid findings, so most
+        # entrants earn little or nothing"; reward_basis is absent, so the kind is the tell
+        return True
     return str(item.get("reward_basis") or "").lower() in POOLED_BASIS
 
 
@@ -671,9 +675,10 @@ def print_bounties(items, limit=None):
     print("")
     print("%d item(s)" % shown)
     if pooled:
-        print("* pool split between winners, not one payout (%s); the per-worker"
-              % "/".join(POOLED_BASIS))
-        print("  figure is not in the feed, so this row is worth less than it reads")
+        print("* pool split between winners, not one payout (audit_contest, %s);"
+              % ", ".join(POOLED_BASIS))
+        print("  the per-worker figure is not in the feed, so this row is worth less")
+        print("  than it reads")
 
 def feed_items(data):
     """Return the item list from any of the three response shapes, or raise."""
@@ -1243,10 +1248,16 @@ def cmd_reachable(args):
     signup_only = [it for it in split["winnable"]
                    if set(requires_of(it)) & set(SIGNUP)]
     pooled = [it for it in split["winnable"] if is_pooled(it)]
+    # 98% of the board total can be one audit contest, so the first line needs the split
+    audit = [it for it in split["listed"]
+             if str(it.get("kind") or "").lower() == "audit_contest"]
+    listed_total = total_usd(split["listed"])
+    audit_total = total_usd(audit)
 
     if args.json:
         emit({
-            "listed": {"count": len(split["listed"]), "usd": total_usd(split["listed"])},
+            "listed": {"count": len(split["listed"]), "usd": listed_total,
+                       "audit_contests": {"count": len(audit), "usd": audit_total}},
             "reachable": {"count": len(split["reachable"]), "usd": total_usd(split["reachable"])},
             "alive": {"count": len(split["alive"]), "usd": total_usd(split["alive"])},
             "winnable": {"count": len(alive), "usd": total_usd(alive)},
@@ -1281,7 +1292,11 @@ def cmd_reachable(args):
     hits = sum(n for _, n in tags) + len(expired)
     if hits > len(dropped_friction):
         reasons.append("tags overlap")
-    row("listed", split["listed"], "")
+    audit_note = ""
+    if audit and listed_total and audit_total / listed_total >= 0.5:
+        audit_note = "$%s of that is %d audit contest(s), a pool split among findings" % (
+            usd_total(audit_total), len(audit))
+    row("listed", split["listed"], audit_note)
     row("reachable", split["reachable"],
         "-%d  %s" % (len(dropped_friction), ", ".join(reasons) or "friction"))
     dead_sources = ", ".join(sorted(split["dead"])) or "none"
