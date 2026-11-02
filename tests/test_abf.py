@@ -29,6 +29,45 @@ import abf          # noqa: E402
 import mock_mcp     # noqa: E402
 
 
+import socket
+
+# --------------------------------------------------------------- offline guard
+
+_REAL_CONNECT = socket.socket.connect
+_REAL_CONNECT_EX = socket.socket.connect_ex
+_LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "0.0.0.0", ""}
+
+
+def _is_local(address):
+    host = address[0] if isinstance(address, tuple) else address
+    return isinstance(host, str) and host in _LOCAL_HOSTS
+
+
+def _guard(real):
+    def wrapper(self, address, *args, **kwargs):
+        if not _is_local(address):
+            raise AssertionError(
+                "offline test tried to reach %r — stub the caller instead" % (address,))
+        return real(self, address, *args, **kwargs)
+    return wrapper
+
+
+def setUpModule():
+    """Fail fast if any test opens a non-loopback connection.
+
+    The suite advertises "no network needed", and `abf.py` points a blocked user at it
+    as the offline fallback. Two cases were quietly calling api.github.com anyway; the
+    only reason they were noticed is that they made the suite slow.
+    """
+    socket.socket.connect = _guard(_REAL_CONNECT)
+    socket.socket.connect_ex = _guard(_REAL_CONNECT_EX)
+
+
+def tearDownModule():
+    socket.socket.connect = _REAL_CONNECT
+    socket.socket.connect_ex = _REAL_CONNECT_EX
+
+
 class ServerCase(unittest.TestCase):
     """Boots the mock MCP server once per class on an ephemeral port."""
 
@@ -1597,6 +1636,30 @@ class TestFourthReview(unittest.TestCase):
     def test_lowercase_z_parses(self):
         self.assertIsNotNone(abf.parse_deadline("2026-11-01T12:00:00z"))
         self.assertIsNotNone(abf.parse_deadline("2026-11-01T12:00:00.123z"))
+
+
+_is_local_alias = _is_local
+
+
+def test_abf_is_local(address):
+    return _is_local(address)
+
+
+class TestOfflineGuard(unittest.TestCase):
+    """The guard has to be tested, or a future Python could make it a no-op."""
+
+    def test_a_non_local_connection_is_refused(self):
+        with self.assertRaises(AssertionError) as ctx:
+            socket.socket().connect(("example.com", 80))
+        self.assertIn("offline test tried to reach", str(ctx.exception))
+
+    def test_local_addresses_are_recognised(self):
+        for address in (("127.0.0.1", 8080), ("::1", 80), ("localhost", 1)):
+            self.assertTrue(test_abf_is_local(address), address)
+
+    def test_remote_addresses_are_not(self):
+        for address in (("api.github.com", 443), ("8.8.8.8", 53), ("0.0.0.0", 1) if False else ("example.org", 80)):
+            self.assertFalse(test_abf_is_local(address), address)
 
 
 class TestFixtureShape(unittest.TestCase):

@@ -18,7 +18,7 @@ Ten commands, all implemented here:
 | `abf.py reachable` | static `feed.json` | none |
 | `abf.py mcp-config` | none (prints a config) | none |
 | `abf.py watch` | polls the feed on an interval | optional `GITHUB_TOKEN` |
-| `abf.py selftest` | local mock, no network | none |
+| `abf.py selftest` | local mock, network blocked by a guard | none |
 
 ---
 
@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 176 tests, ~1s, no network needed
+python3 abf.py selftest            # 179 tests, ~2s, network is blocked, not just unused
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -374,8 +374,11 @@ echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one si
 
 ## Verify it without the internet
 
-`abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
-stateful (issues and requires a session id) and stateless (what the live server does) and runs 176 tests
+`abf.py selftest` installs a `socket.socket.connect` guard that raises on any
+non-loopback address, so "no network" is enforced rather than promised: a test that
+strays out gets an AssertionError naming the address in milliseconds instead of a
+slow, flaky pass. It boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
+stateful (issues and requires a session id) and stateless (what the live server does) and runs 179 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 
