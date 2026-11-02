@@ -1136,7 +1136,7 @@ class TestBoardConcurrency(unittest.TestCase):
         orig_feed, orig_check = abf.load_feed, abf.check_issue
 
         def slow(owner, repo, number):
-            _time.sleep(0.08)
+            _time.sleep(0.02)
             return {"repo": "%s/%s" % (owner, repo), "issue": number, "title": "t",
                     "state": "open", "created_at": "2026-10-01", "age_days": 3,
                     "comments": 1, "prs": 2, "merged_last_100": 60, "merged_sample": 100,
@@ -1281,34 +1281,30 @@ class TestReviewFixes(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(calls), 1)      # one 100-PR page, not two
 
+    def _check_issue_without_network(self, failure):
+        """check_issue touches gh_get twice before the timeline; stub it out entirely."""
+        searched = []
+        def fake_gh(path):
+            if "/timeline" in path:
+                raise RuntimeError(failure)
+            return {"created_at": "2026-10-01T00:00:00Z", "title": "t",
+                    "state": "open", "comments": 0}
+        self.addCleanup(setattr, abf, "gh_get", abf.gh_get)
+        self.addCleanup(setattr, abf, "searched_prs", abf.searched_prs)
+        abf.gh_get = fake_gh
+        abf.searched_prs = lambda o, r, n: searched.append((o, r, n)) or 0
+        with self.assertRaises(RuntimeError):
+            abf.check_issue("o", "r", 5)
+        return searched
+
     def test_a_rate_limit_is_not_swallowed_into_the_fallback(self):
         # falling back would hit Search, whose unauthenticated quota is 10/min
-        searched = []
-        orig_linked, orig_searched = abf.linked_prs, abf.searched_prs
-        def limited(owner, repo, number):
-            raise RuntimeError("GitHub rate limit hit. Set GITHUB_TOKEN to raise it.")
-        abf.linked_prs = limited
-        abf.searched_prs = lambda o, r, n: searched.append((o, r, n)) or 0
-        try:
-            with self.assertRaises(RuntimeError):
-                abf.check_issue("o", "r", 5)
-        finally:
-            abf.linked_prs, abf.searched_prs = orig_linked, orig_searched
-        self.assertEqual(searched, [])
+        self.assertEqual(
+            self._check_issue_without_network("GitHub rate limit hit."), [])
 
     def test_a_404_also_skips_the_fallback(self):
-        searched = []
-        orig_linked, orig_searched = abf.linked_prs, abf.searched_prs
-        def missing(owner, repo, number):
-            raise RuntimeError("GitHub 404 on /repos/o/r/issues/5/timeline")
-        abf.linked_prs = missing
-        abf.searched_prs = lambda o, r, n: searched.append((o, r, n)) or 0
-        try:
-            with self.assertRaises(RuntimeError):
-                abf.check_issue("o", "r", 5)
-        finally:
-            abf.linked_prs, abf.searched_prs = orig_linked, orig_searched
-        self.assertEqual(searched, [])
+        self.assertEqual(
+            self._check_issue_without_network("GitHub 404 on /timeline"), [])
 
     def test_linked_prs_splits_by_pr_state(self):
         # counting every cross-reference calls 22 abandoned PRs "competition"
