@@ -287,10 +287,12 @@ def requires_of(item):
 
 
 def parse_requires(value):
-    """'kyc, stake' -> ('kyc', 'stake'). None or '' -> ()."""
+    """'kyc, stake' or ["kyc", "stake"] -> ('kyc', 'stake')."""
     if not value:
         return ()
-    return tuple(p.strip().lower() for p in value.split(",") if p.strip())
+    if isinstance(value, (list, tuple, set)):
+        return tuple(str(p).strip().lower() for p in value if str(p).strip())
+    return tuple(p.strip().lower() for p in str(value).split(",") if p.strip())
 
 
 def parse_deadline(value):
@@ -412,7 +414,7 @@ def parse_issue_url(text):
     return owner, repo, int(number)
 
 
-def judge(age_days, prs, merged, merged_prs=0):
+def judge(age_days, prs, merged, merged_prs=0, has_history=True):
     """Turn three numbers into a verdict. Pure, so it is cheap to test.
 
     Thresholds come from what the board actually looked like: the busiest issues carry
@@ -423,7 +425,7 @@ def judge(age_days, prs, merged, merged_prs=0):
         return "taken", "%d PR(s) already merged on this issue" % merged_prs
     if prs > 10:
         return "crowded", "%d open PRs already compete" % prs
-    if merged < 5:
+    if has_history and merged < 5:
         return "stalled", "repo merges only %d per 100 closed PRs" % merged
     if age_days > 7:
         return "late", "opened %d days ago; the field is already in" % age_days
@@ -591,7 +593,8 @@ def check_issue(owner, repo, number):
                         "only %d of the linked PRs were readable; counts are lower bounds"
                         % prs)
     else:
-        verdict, why = judge(age_days, prs, per_hundred, stats["merged"])
+        verdict, why = judge(age_days, prs, per_hundred, stats["merged"],
+                             has_history=sample > 0)
     return {
         "repo": "%s/%s" % (owner, repo),
         "issue": number,
@@ -709,7 +712,9 @@ def cmd_mcp(args):
         info.get("protocolVersion", "?"), client.session_id or "(none)"))
     print("tools (%d): %s\n" % (len(tools), clean(", ".join(n for n in names if n))))
 
-    schema = next((t.get("inputSchema") or {} for t in tools if t.get("name") == args.tool), {})
+    schema = next((t.get("inputSchema") for t in tools if t.get("name") == args.tool), {})
+    if not isinstance(schema, dict):
+        schema = {}
     required = schema.get("required") or []
     if required:
         print("%s requires: %s\n" % (args.tool, ", ".join(required)))
@@ -803,6 +808,8 @@ def check_board(args):
             row = {"repo": "%s/%s" % (parsed[0], parsed[1]), "issue": parsed[2],
                    "title": it.get("title", ""), "state": "?", "created_at": "?",
                    "age_days": 0, "comments": 0, "prs": 0, "merged_last_100": 0,
+                   "merged_sample": 0, "merged_count": 0, "merged_prs": 0,
+                   "closed_prs": 0, "prs_complete": False, "prs_source": "error",
                    "verdict": "error", "why": str(exc)[:90]}
         row["usd"] = amount_of(it)
         return row
@@ -903,6 +910,9 @@ def cmd_watch(args):
         try:
             items = load_feed()
         except Exception as exc:      # a bad body or a socket error must not end the loop
+            if args.once:
+                print("feed unavailable: %s" % exc, file=sys.stderr)
+                sys.exit(1)      # cron has to see this as a failure
             if as_json:
                 print(json.dumps({"event": "error", "error": str(exc)}), flush=True)
             else:
@@ -944,7 +954,7 @@ def cmd_watch(args):
                 if why:
                     print("            %s" % why)
                 if it.get("url"):
-                    print("            %s" % it["url"])
+                    print("            %s" % clean(it["url"]))
 
         for it in filter_items(items, args.min_usd, args.source,
                                args.exclude_requires, args.closes_within):
@@ -997,11 +1007,11 @@ def cmd_get(args):
                 value = json.dumps(value, ensure_ascii=False)
             if value is None:
                 value = "—"
-            print("%-11s %s" % (key, value))
+            print("%-11s %s" % (key, clean(value)))
     note = result.get("note")
     if note:
         print("")
-        print("note: %s" % str(note)[:220])
+        print("note: %s" % clean(note, 220))
 
 
 def collect_new(client, since, max_pages=10):
@@ -1030,10 +1040,13 @@ def collect_new(client, since, max_pages=10):
         if not nxt:
             print("warning: has_more is true but no cursor was returned", file=sys.stderr)
             break
-        if nxt == cursor:
+        if nxt == {k: cursor.get(k) for k in nxt}:
             print("warning: the cursor did not advance", file=sys.stderr)
             break
-        cursor = nxt
+        # carry `since` forward: a server may want the window and the cursor together
+        merged_cursor = dict(cursor)
+        merged_cursor.update(nxt)
+        cursor = merged_cursor
     else:
         # ran out of pages while the server still had more: say so instead of
         # returning a short list that looks complete
@@ -1197,8 +1210,7 @@ def cmd_reachable(args):
     evidence = evidence if isinstance(evidence, dict) else {}
     split = reachable_split(items, max_subs, evidence)
     alive = sorted(split["winnable"], key=lambda it: -(amount_of(it) or 0))
-    if args.limit is not None:
-        alive = alive[:args.limit]
+    page = alive[:args.limit] if args.limit is not None else alive
 
     if args.json:
         emit({
@@ -1206,9 +1218,10 @@ def cmd_reachable(args):
             "reachable": {"count": len(split["reachable"]), "usd": total_usd(split["reachable"])},
             "alive": {"count": len(split["alive"]), "usd": total_usd(split["alive"])},
             "winnable": {"count": len(alive), "usd": total_usd(alive)},
+            "returned": len(page),
             "dead_sources": sorted(split["dead"]),
             "payout_evidence": split["health"],
-            "items": alive,
+            "items": page,
         }, True)
         return
 
@@ -1240,7 +1253,7 @@ def cmd_reachable(args):
         "-%d  crowded (%d+ submissions)" % (len(dropped_crowd), max_subs))
 
     print("")
-    print_bounties(alive)
+    print_bounties(page)
     print("contest filtering uses the feed's own \"N submissions\" figure; a source")
     print("that does not report one stays in, so treat the last line as an upper bound")
 
@@ -1252,8 +1265,10 @@ def cmd_selftest(args):
     here = os.path.dirname(os.path.abspath(__file__))
     if here not in sys.path:
         sys.path.insert(0, here)
-    suite = unittest.defaultTestLoader.discover(
-        os.path.join(here, "tests"), pattern="test_*.py")
+    tests_dir = os.path.join(here, "tests")
+    if not os.path.isdir(tests_dir):
+        sys.exit("no tests/ directory next to abf.py; run the client from its repo root")
+    suite = unittest.defaultTestLoader.discover(tests_dir, pattern="test_*.py")
     result = unittest.TextTestRunner(verbosity=2 if args.verbose else 1).run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)
 
@@ -1366,6 +1381,8 @@ def main():
         sys.exit(1)
     except (RuntimeError, ValueError) as exc:
         sys.exit("error: %s" % exc)
+    except KeyError as exc:
+        sys.exit("unexpected response shape: missing key %s" % exc)
     except KeyboardInterrupt:
         sys.exit(130)
 

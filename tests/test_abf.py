@@ -526,7 +526,9 @@ class TestPagination(unittest.TestCase):
         ])
         self.assertEqual([i["id"] for i in abf.collect_new(client, "S1")], ["a", "b"])
         self.assertEqual(client.calls[0], {"since": "S1"})
-        self.assertEqual(client.calls[1], {"next_since": "S2", "next_after_id": "A2"})
+        # `since` is carried forward in case the server wants the window too
+        self.assertEqual(client.calls[1], {"since": "S1", "next_since": "S2",
+                                           "next_after_id": "A2"})
 
     def test_stops_when_has_more_but_no_cursor(self):
         client = self.FakeClient([{"items": [{"id": "a"}], "has_more": True}])
@@ -1846,6 +1848,102 @@ class TestCompletenessHonesty(unittest.TestCase):
             items = abf.collect_new(Client(), "2026-11-01T00:00:00Z")
         self.assertEqual(len(items), 1)
         self.assertIn("no cursor", err.getvalue())
+
+
+class TestOutputConsistency(unittest.TestCase):
+    """Counts describe the board; --limit only pages what is shown."""
+
+    def test_reachable_json_counts_the_whole_tier(self):
+        doc = {"items": [{"id": "i%d" % n, "est_usd": 10, "requires": ["wallet_evm"],
+                          "source": "s"} for n in range(20)], "stats": {}}
+        orig = abf.load_feed_doc
+        abf.load_feed_doc = lambda: doc
+        self.addCleanup(setattr, abf, "load_feed_doc", orig)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.cmd_reachable(argparse.Namespace(limit=5, max_subs=50, json=True))
+        payload = json.loads(buf.getvalue())
+        self.assertEqual(payload["winnable"]["count"], 20)
+        self.assertEqual(payload["returned"], 5)
+        self.assertEqual(len(payload["items"]), 5)
+
+    def test_get_cleans_remote_fields(self):
+        client = abf.MCP("http://example.invalid/mcp")
+        def fake_post(payload, **kwargs):
+            if "id" not in payload:
+                return 202, {}, ""
+            return 200, {"Content-Type": "application/json"}, json.dumps(
+                {"jsonrpc": "2.0", "id": payload["id"],
+                 "result": {"item": {"id": "x", "title": "t",
+                                     "url": "https://e/[2J"}, "note": "n[31m"}})
+        client._post = fake_post
+        orig = abf.MCP
+        abf.MCP = lambda url=None: client
+        self.addCleanup(setattr, abf, "MCP", orig)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.cmd_get(argparse.Namespace(id="x", url="http://example.invalid", json=False))
+        self.assertNotIn("", buf.getvalue())
+
+    def test_a_missing_field_exits_cleanly(self):
+        orig = abf.check_issue
+        abf.check_issue = lambda o, r, n: (_ for _ in ()).throw(KeyError("created_at"))
+        orig_argv = sys.argv
+        sys.argv = ["abf.py", "check", "https://github.com/a/b/issues/1"]
+        try:
+            with self.assertRaises(SystemExit) as ctx:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    abf.main()
+            self.assertIn("missing key", str(ctx.exception))
+        finally:
+            abf.check_issue = orig
+            sys.argv = orig_argv
+
+    def test_watch_once_fails_loudly_when_the_feed_is_down(self):
+        orig = abf.load_feed
+        abf.load_feed = lambda: (_ for _ in ()).throw(RuntimeError("feed down"))
+        self.addCleanup(setattr, abf, "load_feed", orig)
+        state = os.path.join(tempfile.mkdtemp(), "s.json")
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                abf.cmd_watch(argparse.Namespace(interval=30, once=True, state=state,
+                                                 min_usd=0.0, source=None,
+                                                 exclude_requires=(), closes_within=None,
+                                                 json=False))
+        self.assertEqual(ctx.exception.code, 1)
+
+    def test_error_rows_carry_the_same_keys_as_success_rows(self):
+        feed = [{"id": "x", "url": "https://github.com/a/b/issues/1", "est_usd": 5, "title": "t"}]
+        orig_feed, orig_check = abf.load_feed, abf.check_issue
+        abf.load_feed = lambda: feed
+        abf.check_issue = lambda o, r, n: (_ for _ in ()).throw(RuntimeError("boom"))
+        self.addCleanup(setattr, abf, "load_feed", orig_feed)
+        self.addCleanup(setattr, abf, "check_issue", orig_check)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.check_board(argparse.Namespace(all=True, target=None, min_usd=0.0, source=None,
+                                               exclude_requires=(), closes_within=None,
+                                               json=True, limit=10))
+        row = json.loads(buf.getvalue())[0]
+        for key in ("merged_prs", "closed_prs", "prs_complete", "prs_source",
+                    "merged_sample", "merged_count"):
+            self.assertIn(key, row)
+
+    def test_a_repo_without_history_is_not_called_stalled(self):
+        self.assertEqual(abf.judge(1, 0, 0, has_history=False)[0], "worth a look")
+        self.assertEqual(abf.judge(1, 0, 0, has_history=True)[0], "stalled")
+
+    def test_parse_requires_accepts_a_sequence(self):
+        self.assertEqual(abf.parse_requires(["kyc", "stake"]), ("kyc", "stake"))
+        self.assertEqual(abf.parse_requires(("kyc",)), ("kyc",))
+
+    def test_selftest_without_a_tests_directory_says_so(self):
+        orig_file = abf.__file__
+        abf.__file__ = os.path.join(tempfile.mkdtemp(), "abf.py")
+        self.addCleanup(setattr, abf, "__file__", orig_file)
+        with self.assertRaises(SystemExit) as ctx:
+            abf.cmd_selftest(argparse.Namespace(verbose=False))
+        self.assertIn("no tests/", str(ctx.exception))
 
 
 class TestFixtureShape(unittest.TestCase):
