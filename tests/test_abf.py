@@ -450,6 +450,15 @@ class TestRpcParsing(unittest.TestCase):
         client = self._client(body)
         self.assertEqual(client.rpc("tools/list"), {"ok": True})
 
+    def test_an_html_body_is_reported_as_such(self):
+        # a proxy error page should not surface as "Expecting value: line 1 column 1"
+        client = abf.MCP("http://example.invalid/mcp")
+        client._post = lambda payload: (200, {"Content-Type": "text/html"},
+                                        "<html><body>blocked</body></html>")
+        with self.assertRaises(RuntimeError) as ctx:
+            client.rpc("tools/list")
+        self.assertIn("not JSON-RPC", str(ctx.exception))
+
     def test_null_content_is_not_a_crash(self):
         client = self._client('{"jsonrpc":"2.0","id":{ID},"result":{"content":null}}',
                               ctype="application/json")
@@ -523,6 +532,15 @@ class TestStatelessServer(unittest.TestCase):
         client.initialize()
         result = client.call_tool("list_bounties", {"limit": 2})
         self.assertEqual(len(result["items"]), 2)
+
+    def test_unknown_tool_names_the_available_ones(self):
+        with self.assertRaises(SystemExit) as ctx:
+            with redirect_stdout(io.StringIO()):
+                abf.cmd_mcp(argparse.Namespace(url=self.url, tool="no_such_tool",
+                                               arguments="{}", limit=None, json=False))
+        message = str(ctx.exception)
+        self.assertIn("no_such_tool", message)
+        self.assertIn("list_bounties", message)
 
     def test_cmd_mcp_runs_against_a_stateless_server(self):
         buf = io.StringIO()

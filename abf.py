@@ -114,7 +114,15 @@ class MCP:
         if status >= 400:
             raise RuntimeError("HTTP %s on %s: %s" % (status, method, body[:300]))
 
-        if "text/event-stream" in header(hdrs, "Content-Type"):
+        ctype = header(hdrs, "Content-Type").lower()
+        if not body.strip():
+            candidates = []
+        elif "json" not in ctype and "event-stream" not in ctype and body.lstrip()[:1] not in "{[":
+            # a proxy error page or a captive portal, not a JSON-RPC answer
+            raise RuntimeError("%s returned %s, not JSON-RPC: %r"
+                               % (method, ctype or "no content-type", body[:120]))
+
+        if "text/event-stream" in ctype:
             candidates = []
             for frame in sse_data_frames(body):
                 if not frame.strip():
@@ -125,8 +133,6 @@ class MCP:
                     continue      # a keep-alive or non-JSON frame is not an error
         elif body.strip():
             candidates = [json.loads(body)]
-        else:
-            candidates = []
 
         for msg in candidates:
             if msg.get("id") != rid:
@@ -507,6 +513,10 @@ def cmd_mcp(args):
     info = client.initialize()
     server = info.get("serverInfo", {})
     tools = client.list_tools()
+    names = [t.get("name") for t in tools]
+    if args.tool not in names:
+        sys.exit("no tool named %r on this server; available: %s"
+                 % (args.tool, ", ".join(n for n in names if n)))
     try:
         arguments = json.loads(args.arguments)
     except ValueError:
