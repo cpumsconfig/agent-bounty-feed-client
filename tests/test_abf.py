@@ -1364,7 +1364,8 @@ class TestReviewFixes(unittest.TestCase):
         abf.gh_get = lambda path: events if path.endswith("page=1") else []
         try:
             self.assertEqual(abf.linked_prs("o", "r", 5),
-                             {"open": 1, "merged": 1, "closed": 1, "complete": True})
+                             {"open": 1, "merged": 1, "closed": 1,
+                              "complete": True, "source": "timeline"})
         finally:
             abf.gh_get = orig
 
@@ -1739,6 +1740,112 @@ class TestSecurityAudit(unittest.TestCase):
     def test_an_item_without_an_id_is_not_reported_forever(self):
         items = [{"est_usd": 5, "title": "no id"}]
         self.assertEqual(abf.new_items({}, items), [])
+
+
+class TestCompletenessHonesty(unittest.TestCase):
+    """A lower bound must never be reported as a finished count."""
+
+    def test_an_empty_timeline_is_complete(self):
+        # no cross-references is a normal answer, not a truncated read
+        orig = abf.gh_get
+        abf.gh_get = lambda path: []
+        self.addCleanup(setattr, abf, "gh_get", orig)
+        self.assertTrue(abf.linked_prs("o", "r", 5)["complete"])
+
+    def test_a_rate_limit_is_not_retried_inside_merged_rate(self):
+        abf._MERGE_CACHE.clear()
+        calls = []
+        orig = abf.gh_get
+        def limited(path):
+            calls.append(path)
+            raise RuntimeError("GitHub rate limit hit. Set GITHUB_TOKEN to raise it.")
+        abf.gh_get = limited
+        self.addCleanup(setattr, abf, "gh_get", orig)
+        self.addCleanup(abf._MERGE_CACHE.clear)
+        with self.assertRaises(RuntimeError):
+            abf.merged_rate("o", "r")
+        self.assertEqual(len(calls), 1)
+
+    def test_a_truncated_timeline_yields_inconclusive(self):
+        events = [{"event": "cross-referenced",
+                   "source": {"issue": {"number": n, "state": "open",
+                                        "pull_request": {}}}} for n in range(100)]
+        orig_gh, orig_rate = abf.gh_get, abf.merged_rate
+        def fake(path):
+            if "/timeline" in path and path.endswith("page=1"):
+                return events
+            if "/timeline" in path:
+                return events
+            return {"created_at": "2026-10-01T00:00:00Z", "title": "t",
+                    "state": "open", "comments": 0}
+        abf.gh_get = fake
+        abf.merged_rate = lambda o, r: (50, 100, 50)
+        self.addCleanup(setattr, abf, "gh_get", orig_gh)
+        self.addCleanup(setattr, abf, "merged_rate", orig_rate)
+        result = abf.check_issue("o", "r", 5)
+        self.assertEqual(result["verdict"], "inconclusive")
+        self.assertFalse(result["prs_complete"])
+
+    def test_the_search_fallback_is_never_complete(self):
+        orig_linked, orig_searched = abf.linked_prs, abf.searched_prs
+        def boom(owner, repo, number):
+            raise ValueError("unexpected payload")
+        abf.linked_prs = boom
+        abf.searched_prs = lambda o, r, n: 4
+        self.addCleanup(setattr, abf, "linked_prs", orig_linked)
+        self.addCleanup(setattr, abf, "searched_prs", orig_searched)
+        stats = abf.linked_prs("o", "r", 5) if False else None
+        # exercise the branch through check_issue instead
+        orig_gh, orig_rate = abf.gh_get, abf.merged_rate
+        abf.gh_get = lambda path: {"created_at": "2026-10-01T00:00:00Z", "title": "t",
+                                   "state": "open", "comments": 0}
+        abf.merged_rate = lambda o, r: (50, 100, 50)
+        self.addCleanup(setattr, abf, "gh_get", orig_gh)
+        self.addCleanup(setattr, abf, "merged_rate", orig_rate)
+        result = abf.check_issue("o", "r", 5)
+        self.assertEqual(result["prs_source"], "search")
+        self.assertFalse(result["prs_complete"])
+        self.assertEqual(result["verdict"], "inconclusive")
+
+    def test_a_negative_price_is_not_a_listing(self):
+        split = abf.reachable_split([{"id": "neg", "est_usd": -5,
+                                      "requires": ["wallet_evm"]}])
+        self.assertEqual(split["listed"], [])
+
+    def test_attempts_zero_is_clamped(self):
+        orig = abf.urllib.request.urlopen
+        def boom(req, timeout=None):
+            raise OSError("reset")
+        abf.urllib.request.urlopen = boom
+        orig_sleep = abf.time.sleep
+        abf.time.sleep = lambda _s: None
+        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig)
+        self.addCleanup(setattr, abf.time, "sleep", orig_sleep)
+        with self.assertRaises(OSError):
+            abf.http("https://example.invalid/x", attempts=0)
+
+    def test_json_output_respects_limit(self):
+        orig = abf.http
+        abf.http = lambda *a, **k: (200, {}, json.dumps(
+            [{"id": str(n), "est_usd": 5} for n in range(5)]))
+        self.addCleanup(setattr, abf, "http", orig)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.cmd_earn_now(argparse.Namespace(min_usd=0.0, source=None,
+                                                exclude_requires=(), closes_within=None,
+                                                limit=2, json=True))
+        self.assertEqual(json.loads(buf.getvalue())["count"], 2)
+
+    def test_collect_new_warns_when_has_more_has_no_cursor(self):
+        import contextlib
+        class Client:
+            def call_tool(self, name, arguments):
+                return {"items": [{"id": "a"}], "has_more": True}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            items = abf.collect_new(Client(), "2026-11-01T00:00:00Z")
+        self.assertEqual(len(items), 1)
+        self.assertIn("no cursor", err.getvalue())
 
 
 class TestFixtureShape(unittest.TestCase):

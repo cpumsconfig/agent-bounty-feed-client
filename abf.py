@@ -63,6 +63,7 @@ def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3, idempoten
     req = urllib.request.Request(url, data=body, headers=hdrs,
                                  method="POST" if body else "GET")
     # Retrying a POST is only safe because every call this client makes is read-only.
+    attempts = max(1, attempts)
     last = None
     for attempt in range(attempts):
         try:
@@ -272,7 +273,7 @@ def amount_of(item):
         return None
     # nan/inf compare false against every threshold, so they would slip through
     # --min-usd and poison every total; treat them as unknown
-    return value if math.isfinite(value) else None
+    return value if math.isfinite(value) and value >= 0 else None
 
 
 def requires_of(item):
@@ -429,6 +430,12 @@ def judge(age_days, prs, merged, merged_prs=0):
     return "worth a look", "%d PRs, %d merged/100, %d days old" % (prs, merged, age_days)
 
 
+def is_permanent(exc):
+    """A 4xx answer will not improve on a second attempt; a reset might."""
+    text = str(exc)
+    return "rate limit" in text.lower() or "GitHub 4" in text
+
+
 def gh_get(path):
     headers = {"Accept": "application/vnd.github+json", "User-Agent": UA}
     token = os.environ.get("GITHUB_TOKEN")
@@ -442,8 +449,8 @@ def gh_get(path):
     return json.loads(body)
 
 
-VERDICT_RANK = {"worth a look": 0, "late": 1, "stalled": 2, "crowded": 3,
-                "taken": 4, "error": 5}
+VERDICT_RANK = {"worth a look": 0, "late": 1, "stalled": 2, "inconclusive": 3,
+                "crowded": 4, "taken": 5, "error": 6}
 
 
 def rank(results):
@@ -496,7 +503,7 @@ def _merged_rate_uncached(owner, repo):
         try:
             closed = gh_get("/repos/%s/%s/pulls?state=closed&per_page=%d" % (owner, repo, size))
         except Exception as exc:      # IncompleteRead on multi-MB responses, timeouts, 5xx
-            if "GitHub 4" in str(exc):
+            if is_permanent(exc):
                 # a 404 or a rate-limit answer will not improve with a smaller page;
                 # retrying it just burns quota
                 raise
@@ -524,7 +531,10 @@ def linked_prs(owner, repo, number, max_pages=5):
     for page in range(1, max_pages + 1):
         events = gh_get("/repos/%s/%s/issues/%d/timeline?per_page=100&page=%d"
                         % (owner, repo, number, page))
-        if not isinstance(events, list) or not events:
+        if not isinstance(events, list):
+            break              # malformed page: incomplete, do not claim otherwise
+        if not events:
+            complete = True    # a short (or empty) page is how pagination ends
             break
         for ev in events:
             if ev.get("event") != "cross-referenced":
@@ -543,7 +553,7 @@ def linked_prs(owner, repo, number, max_pages=5):
             complete = True
             break
     return {"open": len(opened), "merged": len(merged), "closed": len(closed),
-            "complete": complete}
+            "complete": complete, "source": "timeline"}
 
 
 def searched_prs(owner, repo, number):
@@ -569,11 +579,19 @@ def check_issue(owner, repo, number):
         if "rate limit" in text.lower() or "GitHub 404" in text or "GitHub 403" in text:
             raise
         prs = searched_prs(owner, repo, number)   # noisier, but better than nothing
-        stats = {"open": prs, "merged": 0, "closed": 0}
+        # Search cannot see merged PRs at all, so this result is never complete
+        stats = {"open": prs, "merged": 0, "closed": 0, "complete": False,
+                 "source": "search"}
 
     merged, sample, per_hundred = merged_rate(owner, repo)
 
-    verdict, why = judge(age_days, prs, per_hundred, stats["merged"])
+    if not stats.get("complete", False):
+        # lower bounds are not a verdict: a merged PR could be on an unread page
+        verdict, why = ("inconclusive",
+                        "only %d of the linked PRs were readable; counts are lower bounds"
+                        % prs)
+    else:
+        verdict, why = judge(age_days, prs, per_hundred, stats["merged"])
     return {
         "repo": "%s/%s" % (owner, repo),
         "issue": number,
@@ -584,7 +602,8 @@ def check_issue(owner, repo, number):
         "comments": issue["comments"],
         "prs": prs,
         "merged_prs": stats["merged"],
-        "prs_complete": stats.get("complete", True),
+        "prs_complete": stats.get("complete", False),
+        "prs_source": stats.get("source", "timeline"),
         "closed_prs": stats["closed"],
         "merged_last_100": per_hundred,
         "merged_sample": sample,
@@ -629,6 +648,16 @@ def print_bounties(items, limit=None):
     print("")
     print("%d item(s)" % shown)
 
+def feed_items(data):
+    """Return the item list from any of the three response shapes, or raise."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        items = data.get("items")
+        return items if isinstance(items, list) else []
+    raise RuntimeError("expected an object or a list, got %s" % type(data).__name__)
+
+
 def cmd_earn_now(args):
     status, _, body = http(BASE + "/earn-now")
     if status != 200:
@@ -636,7 +665,7 @@ def cmd_earn_now(args):
     data = json.loads(body)
     if isinstance(data, list):
         data = {"items": data}
-    items = filter_items(data.get("items", []), args.min_usd, args.source,
+    items = filter_items(feed_items(data), args.min_usd, args.source,
                          args.exclude_requires, args.closes_within)
     if args.limit is not None:
         items = items[:args.limit]
@@ -678,7 +707,7 @@ def cmd_mcp(args):
     print("connected: %s %s | protocol %s | session %s\n" % (
         server.get("name", "?"), server.get("version", "?"),
         info.get("protocolVersion", "?"), client.session_id or "(none)"))
-    print("tools (%d): %s\n" % (len(tools), ", ".join(t["name"] for t in tools)))
+    print("tools (%d): %s\n" % (len(tools), clean(", ".join(n for n in names if n))))
 
     schema = next((t.get("inputSchema") or {} for t in tools if t.get("name") == args.tool), {})
     required = schema.get("required") or []
@@ -702,9 +731,8 @@ def cmd_feed(args):
         # escape watch's `except Exception` and kill the daemon
         raise RuntimeError("feed.json returned HTTP %s" % status)
     data = json.loads(body)
-    items = data if isinstance(data, list) else data.get("items", [])
-    items = filter_items(items, args.min_usd, args.source, args.exclude_requires,
-                         args.closes_within)
+    items = filter_items(feed_items(data), args.min_usd, args.source,
+                         args.exclude_requires, args.closes_within)
     items = items[:args.top] if args.top is not None else items
     if emit({"count": len(items), "items": items}, args.json):
         return
@@ -798,8 +826,8 @@ def check_board(args):
     print("-" * 112)
     for r in results:
         print("%-34s %7s %6d %7d  %-12s %s" % (
-            ("%s#%d" % (r["repo"], r["issue"]))[:34], money(r.get("usd")), r["prs"],
-            r["merged_last_100"], r["verdict"].upper(), r["title"][:34]))
+            ("%s#%d" % (clean(r["repo"]), r["issue"]))[:34], money(r.get("usd")), r["prs"],
+            r["merged_last_100"], r["verdict"].upper(), clean(r["title"], 34)))
 
     open_now = [r for r in results if r["verdict"] == "worth a look"]
     print("\n%d checked, %d worth a look" % (len(results), len(open_now)))
@@ -959,7 +987,7 @@ def cmd_get(args):
         return
     # the tool wraps the bounty: {"generated_at": ..., "item": {...}, "note": ...}
     item = result.get("item") if isinstance(result.get("item"), dict) else result
-    print("%s  %s" % (item.get("id", "?"), item.get("title", "")))
+    print("%s  %s" % (clean(item.get("id", "?")), clean(item.get("title", ""))))
     print("-" * 88)
     for key in ("est_usd", "currency", "source", "network", "deadline",
                 "slots_left", "requires", "url", "first_seen"):
@@ -988,11 +1016,22 @@ def collect_new(client, since, max_pages=10):
         result = client.call_tool("get_new_bounties", dict(cursor))
         if not isinstance(result, dict):
             break
-        items.extend(result.get("items") or [])
+        page_items = result.get("items")
+        if page_items is None:
+            page_items = []
+        if not isinstance(page_items, list):
+            print("warning: items was a %s, not a list" % type(page_items).__name__,
+                  file=sys.stderr)
+            break
+        items.extend(x for x in page_items if isinstance(x, dict))
         if not result.get("has_more"):
             break
         nxt = {k: result[k] for k in ("next_since", "next_after_id") if result.get(k)}
-        if not nxt or nxt == cursor:
+        if not nxt:
+            print("warning: has_more is true but no cursor was returned", file=sys.stderr)
+            break
+        if nxt == cursor:
+            print("warning: the cursor did not advance", file=sys.stderr)
             break
         cursor = nxt
     else:
@@ -1011,12 +1050,14 @@ def cmd_new(args):
     items = collect_new(client, since)
     items = filter_items(items, args.min_usd, args.source, args.exclude_requires,
                          args.closes_within)
+    if args.limit is not None:
+        items = items[:args.limit]
     if args.json:
         emit({"since": since, "count": len(items), "items": items}, True)
         return
     print("new since %s" % since)
     print("")
-    print_bounties(items, args.limit)
+    print_bounties(items)
 
 
 def cmd_mcp_config(args):
@@ -1156,6 +1197,8 @@ def cmd_reachable(args):
     evidence = evidence if isinstance(evidence, dict) else {}
     split = reachable_split(items, max_subs, evidence)
     alive = sorted(split["winnable"], key=lambda it: -(amount_of(it) or 0))
+    if args.limit is not None:
+        alive = alive[:args.limit]
 
     if args.json:
         emit({
@@ -1197,7 +1240,7 @@ def cmd_reachable(args):
         "-%d  crowded (%d+ submissions)" % (len(dropped_crowd), max_subs))
 
     print("")
-    print_bounties(alive, args.limit)
+    print_bounties(alive)
     print("contest filtering uses the feed's own \"N submissions\" figure; a source")
     print("that does not report one stays in, so treat the last line as an upper bound")
 

@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 187 tests, ~2s, network is blocked, not just unused
+python3 abf.py selftest            # 195 tests, ~2s, network is blocked, not just unused
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -227,6 +227,10 @@ verdict    TAKEN — 10 PR(s) already merged on this issue
            you would be entry 99; skip it
 ```
 
+When the timeline cannot be read to the end, the verdict is `INCONCLUSIVE` rather than a
+guess: an unread page could hold a merged PR, and a lower bound is not an answer. The
+Search fallback is never treated as complete, because Search cannot see merged PRs at all.
+
 The three counts are separate because they mean different things. **Open** PRs are the ones you
 would race. **Merged** PRs mean the work is already in, whatever the issue state says. **Closed
 unmerged** are abandoned attempts and count for nothing — on one real issue the split was 0 open,
@@ -367,7 +371,7 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1331 lines, 1079 of them code. The transport — handshake, conditional session
+`abf.py` is 1374 lines, 1116 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
@@ -378,7 +382,7 @@ echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one si
 non-loopback address, so "no network" is enforced rather than promised: a test that
 strays out gets an AssertionError naming the address in milliseconds instead of a
 slow, flaky pass. It boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
-stateful (issues and requires a session id) and stateless (what the live server does) and runs 187 tests
+stateful (issues and requires a session id) and stateless (what the live server does) and runs 195 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 
