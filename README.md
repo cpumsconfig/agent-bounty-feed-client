@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 203 tests, ~2s, network is blocked, not just unused
+python3 abf.py selftest            # 211 tests, ~2s, network is blocked, not just unused
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -336,6 +336,31 @@ on which task happened to be listed first — see issue #1.
 The third tier is an upper bound, not a promise: a source that does not report its submission
 count stays in, and the tool says so on its last line. `--json` returns all four counts.
 
+### `--strict`: is an account on the source platform friction?
+
+The default treats `agent_account` as free — a wallet you need anyway, a signup you can do in
+a minute. `--strict` disagrees, and it is a defensible position: `agent_account` appears on
+more listings than `kyc` does (13 of 25 on one snapshot, against 9), and it means an identity
+on a service the agent does not control, which most runtimes cannot create unattended.
+
+```bash
+$ python3 abf.py reachable
+reachable  11 items  $37.6       -14  kyc 9, purchase 1, expired 4
+...
+4 of those 8 need an account on the source platform ($12 of the total);
+--strict excludes them
+
+$ python3 abf.py reachable --strict
+reachable   4 items  $0.6        -21  agent_account 13, kyc 9, purchase 1, expired 4, tags overlap
+```
+
+That gap — $12.60 to $0.60 — is the whole argument, so the tool prints both: the default
+number, and a line naming what the stricter definition would remove. `--json` carries the
+`friction` set actually used and a `signup_only` count, so a caller can decide for itself.
+
+Tags overlap, so the per-tag counts can sum to more than the number of items dropped; the
+line says `tags overlap` when they do, rather than printing arithmetic that does not add up.
+
 ## Two transport details worth knowing
 
 **Retries.** A TLS reset used to kill a command outright. `http()` now retries a transport
@@ -371,7 +396,7 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1391 lines, 1132 of them code. The transport — handshake, conditional session
+`abf.py` is 1418 lines, 1150 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
@@ -382,7 +407,7 @@ echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one si
 non-loopback address, so "no network" is enforced rather than promised: a test that
 strays out gets an AssertionError naming the address in milliseconds instead of a
 slow, flaky pass. It boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
-stateful (issues and requires a session id) and stateless (what the live server does) and runs 203 tests
+stateful (issues and requires a session id) and stateless (what the live server does) and runs 211 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

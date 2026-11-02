@@ -253,6 +253,11 @@ def usd_total(value):
 
 
 FRICTION = ("kyc", "stake", "bond", "purchase", "human_only")
+# Registering an agent identity on the source platform. Lighter than KYC — no documents
+# are involved — but it is still an account on a service you do not control, and most
+# agent runtimes cannot create one unattended. Kept separate so the default number does
+# not move; --strict folds it in.
+SIGNUP = ("agent_account",)
 USD_LIKE = ("USD", "USDC", "OUSD", "USDT", "DAI")
 
 
@@ -1160,7 +1165,8 @@ def is_expired(item):
     return left is not None and left < 0
 
 
-def reachable_split(items, contested_at=CONTESTED_AT, payout_evidence=None):
+def reachable_split(items, contested_at=CONTESTED_AT, payout_evidence=None,
+                    friction=FRICTION):
     """Four tiers, each with its own evidence scope.
 
     listed -> reachable (friction, deadline) -> alive (payout evidence) -> winnable (crowd).
@@ -1170,7 +1176,7 @@ def reachable_split(items, contested_at=CONTESTED_AT, payout_evidence=None):
     # the tiers must nest: reachable is a subset of listed, not a parallel set,
     # otherwise the "-N" arithmetic in the output goes negative
     listed = [it for it in items if isinstance(it, dict) and amount_of(it) is not None]
-    reachable = [it for it in filter_items(listed, 0.0, None, FRICTION)
+    reachable = [it for it in filter_items(listed, 0.0, None, friction)
                  if not is_expired(it)]
     health = board_health(payout_evidence)
     dead = {s for s, entry in health.items() if source_is_dead(entry)}
@@ -1187,11 +1193,11 @@ def reachable_split(items, contested_at=CONTESTED_AT, payout_evidence=None):
     }
 
 
-def friction_breakdown(items):
+def friction_breakdown(items, friction=FRICTION):
     """How many items each friction tag is responsible for, most common first."""
     counts = {}
     for it in items:
-        for tag in sorted(set(requires_of(it)) & set(FRICTION)):
+        for tag in sorted(set(requires_of(it)) & set(friction)):
             counts[tag] = counts.get(tag, 0) + 1
     return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
@@ -1205,12 +1211,18 @@ def cmd_reachable(args):
     doc = load_feed_doc()
     items = doc.get("items", [])
     max_subs = getattr(args, "max_subs", CONTESTED_AT)
+    strict = getattr(args, "strict", False)
+    friction = FRICTION + SIGNUP if strict else FRICTION
     stats = doc.get("stats")
     evidence = stats.get("payout_evidence") if isinstance(stats, dict) else {}
     evidence = evidence if isinstance(evidence, dict) else {}
-    split = reachable_split(items, max_subs, evidence)
+    split = reachable_split(items, max_subs, evidence, friction)
     alive = sorted(split["winnable"], key=lambda it: -(amount_of(it) or 0))
     page = alive[:args.limit] if args.limit is not None else alive
+    # what a stricter definition would remove from the list below, i.e. the items that
+    # are only here because an account on the source platform does not count as friction
+    signup_only = [it for it in split["winnable"]
+                   if set(requires_of(it)) & set(SIGNUP)]
 
     if args.json:
         emit({
@@ -1219,6 +1231,8 @@ def cmd_reachable(args):
             "alive": {"count": len(split["alive"]), "usd": total_usd(split["alive"])},
             "winnable": {"count": len(alive), "usd": total_usd(alive)},
             "returned": len(page),
+            "friction": sorted(friction),
+            "signup_only": {"count": len(signup_only), "usd": total_usd(signup_only)},
             "dead_sources": sorted(split["dead"]),
             "payout_evidence": split["health"],
             "items": page,
@@ -1236,11 +1250,16 @@ def cmd_reachable(args):
     def row(label, items, note=""):
         print(("%-10s %2d items  $%-10s %s" % (label, len(items), usd_total(total_usd(items)), note)).rstrip())
 
-    tags = friction_breakdown(dropped_friction)
+    tags = friction_breakdown(dropped_friction, friction)
     expired = [it for it in dropped_friction if is_expired(it)]
     reasons = ["%s %d" % (t, n) for t, n in tags]
     if expired:
         reasons.append("expired %d" % len(expired))
+    # an item can carry several tags, so the per-tag counts can sum to more than the
+    # number of items dropped; say so rather than print arithmetic that does not add up
+    hits = sum(n for _, n in tags) + len(expired)
+    if hits > len(dropped_friction):
+        reasons.append("tags overlap")
     row("listed", split["listed"], "")
     row("reachable", split["reachable"],
         "-%d  %s" % (len(dropped_friction), ", ".join(reasons) or "friction"))
@@ -1251,6 +1270,12 @@ def cmd_reachable(args):
             "; dead source: " + dead_sources if split["dead"] else ""))
     row("winnable", split["winnable"],
         "-%d  crowded (%d+ submissions)" % (len(dropped_crowd), max_subs))
+
+    if signup_only and not strict:
+        print("")
+        print("%d of those %d need an account on the source platform ($%s of the total);"
+              % (len(signup_only), len(split["winnable"]), usd_total(total_usd(signup_only))))
+        print("--strict excludes them")
 
     print("")
     print_bounties(page)
@@ -1335,6 +1360,8 @@ def main():
     p = sub.add_parser("reachable", help="what is actually reachable after friction and dead sources")
     p.add_argument("--max-subs", type=int, default=CONTESTED_AT, metavar="N",
                    help="treat N or more submissions as crowded (default %d)" % CONTESTED_AT)
+    p.add_argument("--strict", action="store_true",
+                   help="also treat an account on the source platform as friction")
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_reachable)

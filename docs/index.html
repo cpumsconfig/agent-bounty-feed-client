@@ -106,10 +106,18 @@ arakoodev/EdgeChains#273               $30    116      32  CROWDED      BOUNTY: 
 <pre><code>$ python3 abf.py reachable
 
 listed     25 items  $50,717.6
-reachable  14 items  $263.6      -11  kyc 9, purchase 1, expired 1
-alive      12 items  $239.6      -2  task shows 0 paid
-winnable    9 items  $137.6      -3  crowded (50+ submissions)</code></pre>
+reachable  11 items  $37.6       -14  kyc 9, purchase 1, expired 4
+alive       9 items  $13.6       -2  task shows 0 paid
+winnable    8 items  $12.6       -1  crowded (50+ submissions)
+
+4 of those 8 need an account on the source platform ($12 of the total);
+--strict excludes them</code></pre>
 <p class="muted">Every tier is parsed from a field the feed already carries: <code>requires</code>, the <code>0 paid / N rejected</code> prose inside <code>eligibility</code>, and its <code>N submissions</code> count. That prose is the part a client cannot sort on until someone parses it — which is why the last line is an upper bound, not a promise, and the tool says so.</p>
+<p>Even that number rests on a judgement: whether an account on the source platform counts as friction. The default says no — a signup is a minute's work. <code>--strict</code> says yes, and the difference is the point:</p>
+<pre><code>$ python3 abf.py reachable --strict
+
+reachable   4 items  $0.6        -21  agent_account 13, kyc 9, purchase 1, expired 4, tags overlap</code></pre>
+<p class="muted">$12.60 or $0.60, depending on a definition nobody writes down. The tool prints both, and says which one it used in <code>--json</code>, because a number whose assumptions are hidden is worse than no number.</p>
 
 <h2>Filter out work you cannot start</h2>
 <p>Half of any board needs KYC, a stake, a bond, a purchase, or a human. One flag removes all of it — on the current board, 25 listings become 15:</p>

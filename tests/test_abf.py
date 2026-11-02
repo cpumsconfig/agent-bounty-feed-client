@@ -1946,6 +1946,79 @@ class TestOutputConsistency(unittest.TestCase):
         self.assertIn("no tests/", str(ctx.exception))
 
 
+class TestStrictFriction(unittest.TestCase):
+    """agent_account is a lighter wall than KYC, so it is opt-in via --strict."""
+
+    FEED = [
+        {"id": "open", "est_usd": 10, "source": "s", "requires": ["wallet_evm"]},
+        {"id": "signup", "est_usd": 20, "source": "s",
+         "requires": ["agent_account", "wallet_evm"]},
+        {"id": "kyc", "est_usd": 30, "source": "s", "requires": ["kyc", "wallet_evm"]},
+    ]
+
+    def test_default_keeps_signup_items(self):
+        split = abf.reachable_split(self.FEED)
+        self.assertEqual([i["id"] for i in split["reachable"]], ["open", "signup"])
+
+    def test_strict_drops_signup_items(self):
+        split = abf.reachable_split(self.FEED, friction=abf.FRICTION + abf.SIGNUP)
+        self.assertEqual([i["id"] for i in split["reachable"]], ["open"])
+
+    def test_signup_is_not_in_the_default_set(self):
+        self.assertNotIn("agent_account", abf.FRICTION)
+        self.assertEqual(abf.SIGNUP, ("agent_account",))
+
+    def test_breakdown_follows_the_set_it_is_given(self):
+        dropped = [self.FEED[1], self.FEED[2]]
+        self.assertEqual(dict(abf.friction_breakdown(dropped)), {"kyc": 1})
+        self.assertEqual(dict(abf.friction_breakdown(dropped, abf.FRICTION + abf.SIGNUP)),
+                         {"agent_account": 1, "kyc": 1})
+
+    def _run(self, strict):
+        orig = abf.load_feed_doc
+        abf.load_feed_doc = lambda: {"items": self.FEED, "stats": {}}
+        self.addCleanup(setattr, abf, "load_feed_doc", orig)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.cmd_reachable(argparse.Namespace(limit=None, max_subs=50,
+                                                 strict=strict, json=False))
+        return buf.getvalue()
+
+    def test_the_note_names_what_strict_would_remove(self):
+        out = self._run(strict=False)
+        self.assertIn("need an account on the source platform", out)
+        self.assertIn("--strict excludes them", out)
+
+    def test_strict_prints_no_such_note(self):
+        self.assertNotIn("--strict excludes them", self._run(strict=True))
+
+    def test_json_reports_the_friction_set_used(self):
+        orig = abf.load_feed_doc
+        abf.load_feed_doc = lambda: {"items": self.FEED, "stats": {}}
+        self.addCleanup(setattr, abf, "load_feed_doc", orig)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.cmd_reachable(argparse.Namespace(limit=None, max_subs=50,
+                                                 strict=True, json=True))
+        payload = json.loads(buf.getvalue())
+        self.assertIn("agent_account", payload["friction"])
+        self.assertEqual(payload["reachable"]["count"], 1)
+        self.assertEqual(payload["signup_only"]["count"], 0)
+
+    def test_overlapping_tags_are_labelled(self):
+        # one item, two reasons: the counts must not look like a wrong subtraction
+        orig = abf.load_feed_doc
+        abf.load_feed_doc = lambda: {"items": [
+            {"id": "both", "est_usd": 5, "source": "s",
+             "requires": ["kyc", "agent_account"]}], "stats": {}}
+        self.addCleanup(setattr, abf, "load_feed_doc", orig)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.cmd_reachable(argparse.Namespace(limit=None, max_subs=50,
+                                                 strict=True, json=False))
+        self.assertIn("tags overlap", buf.getvalue())
+
+
 class TestFixtureShape(unittest.TestCase):
     """fixtures/earn-now.sample.json is a real captured response."""
 
