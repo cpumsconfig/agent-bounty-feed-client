@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 230 tests, ~2s, network is blocked, not just unused
+python3 abf.py selftest            # 233 tests, ~2s, network is blocked, not just unused
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -437,6 +437,12 @@ and `--json` gives `listed.audit_contests: {count, usd}`. Audit contests have no
 failure three times with backoff and never retries an HTTP error — a 404 is an answer, a
 reset is not.
 
+**Redirects.** urllib follows them by default. A 302 from a misconfigured or compromised
+endpoint can move the call to another host, and a 303 silently turns the POST into a GET,
+dropping the JSON-RPC body. `SameHostRedirects` follows a redirect only while it stays on
+the host the request started on, so `http -> https` and trailing-slash normalisation keep
+working while everything else is refused and reported as a 30x status.
+
 **Pagination.** `get_new_bounties` pages: a response can carry `has_more` plus
 `next_since` / `next_after_id`. `abf.py new` walks those to exhaustion, because stopping at
 the first page silently drops everything past the cut. It stops on a repeated cursor or
@@ -470,7 +476,7 @@ Three details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1536 lines, 1245 of them code. The transport — handshake, conditional session
+`abf.py` is 1569 lines, 1269 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
@@ -481,7 +487,7 @@ echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one si
 non-loopback address, so "no network" is enforced rather than promised: a test that
 strays out gets an AssertionError naming the address in milliseconds instead of a
 slow, flaky pass. It boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
-stateful (issues and requires a session id) and stateless (what the live server does) and runs 230 tests
+stateful (issues and requires a session id) and stateless (what the live server does) and runs 233 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

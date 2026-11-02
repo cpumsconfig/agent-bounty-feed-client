@@ -56,6 +56,39 @@ def clean(value, limit=None):
 
 # ---------------------------------------------------------------- transport
 
+class SameHostRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only while it stays on the host the request started on.
+
+    urllib follows redirects by default, which means a 302 from a compromised or
+    misconfigured endpoint can move the call somewhere else — and a 303 would turn the
+    POST into a GET and drop the JSON-RPC body without saying so. Staying on the original
+    host keeps http->https and trailing-slash normalisation working while refusing the
+    rest.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old_host = urllib.parse.urlsplit(req.full_url).netloc.lower()
+        new_host = urllib.parse.urlsplit(newurl).netloc.lower()
+        if new_host != old_host:
+            raise urllib.error.HTTPError(
+                req.full_url, code,
+                "redirect to another host refused: %s -> %s" % (old_host or "?", new_host),
+                headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(SameHostRedirects)
+
+
+def open_request(req, timeout=None):
+    """The one place a request leaves this program.
+
+    Kept as a module-level function so tests can replace it without patching urllib for
+    the whole process.
+    """
+    return _OPENER.open(req, timeout=timeout)
+
+
 def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3, idempotent=True):
     hdrs = {"User-Agent": UA}
     if headers:
@@ -71,7 +104,7 @@ def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3, idempoten
     last = None
     for attempt in range(attempts):
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with open_request(req, timeout=timeout) as resp:
                 raw = resp.read(MAX_BODY + 1)
                 if len(raw) > MAX_BODY:
                     raise RuntimeError("response exceeded %d bytes" % MAX_BODY)

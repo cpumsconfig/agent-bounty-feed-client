@@ -435,15 +435,15 @@ class TestTransportResilience(unittest.TestCase):
 
     def _patch(self, fail_times):
         calls = {"n": 0}
-        orig_open, orig_sleep = abf.urllib.request.urlopen, abf.time.sleep
+        orig_open, orig_sleep = abf.open_request, abf.time.sleep
         def flaky(req, timeout=None):
             calls["n"] += 1
             if calls["n"] <= fail_times:
                 raise OSError("connection reset")
             return self._Resp()
-        abf.urllib.request.urlopen = flaky
+        abf.open_request = flaky
         abf.time.sleep = lambda _s: None
-        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig_open)
+        self.addCleanup(setattr, abf, "open_request", orig_open)
         self.addCleanup(setattr, abf.time, "sleep", orig_sleep)
         return calls
 
@@ -461,12 +461,12 @@ class TestTransportResilience(unittest.TestCase):
 
     def test_http_error_is_not_retried(self):
         calls = {"n": 0}
-        orig = abf.urllib.request.urlopen
+        orig = abf.open_request
         def boom(req, timeout=None):
             calls["n"] += 1
             raise abf.urllib.error.HTTPError("u", 404, "nf", {}, None)
-        abf.urllib.request.urlopen = boom
-        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig)
+        abf.open_request = boom
+        self.addCleanup(setattr, abf, "open_request", orig)
         status, _, _ = abf.http("https://example.invalid/x")
         self.assertEqual(status, 404)
         self.assertEqual(calls["n"], 1)
@@ -1278,7 +1278,7 @@ class TestReviewFixes(unittest.TestCase):
 
     def test_a_429_is_retried(self):
         calls = {"n": 0}
-        orig_open, orig_sleep = abf.urllib.request.urlopen, abf.time.sleep
+        orig_open, orig_sleep = abf.open_request, abf.time.sleep
         class R:
             status = 200
             headers = {}
@@ -1290,9 +1290,9 @@ class TestReviewFixes(unittest.TestCase):
             if calls["n"] == 1:
                 raise abf.urllib.error.HTTPError("u", 429, "slow down", {"Retry-After": "1"}, None)
             return R()
-        abf.urllib.request.urlopen = flaky
+        abf.open_request = flaky
         abf.time.sleep = lambda _s: None
-        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig_open)
+        self.addCleanup(setattr, abf, "open_request", orig_open)
         self.addCleanup(setattr, abf.time, "sleep", orig_sleep)
         status, _, _ = abf.http("https://example.invalid/x")
         self.assertEqual(status, 200)
@@ -1300,12 +1300,12 @@ class TestReviewFixes(unittest.TestCase):
 
     def test_a_404_is_still_not_retried(self):
         calls = {"n": 0}
-        orig_open = abf.urllib.request.urlopen
+        orig_open = abf.open_request
         def boom(req, timeout=None):
             calls["n"] += 1
             raise abf.urllib.error.HTTPError("u", 404, "nf", {}, None)
-        abf.urllib.request.urlopen = boom
-        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig_open)
+        abf.open_request = boom
+        self.addCleanup(setattr, abf, "open_request", orig_open)
         status, _, _ = abf.http("https://example.invalid/x")
         self.assertEqual(status, 404)
         self.assertEqual(calls["n"], 1)
@@ -1537,7 +1537,7 @@ class TestInputAndShapeHardening(unittest.TestCase):
     def test_incomplete_read_is_retried(self):
         import http.client as hc
         calls = {"n": 0}
-        orig_open, orig_sleep = abf.urllib.request.urlopen, abf.time.sleep
+        orig_open, orig_sleep = abf.open_request, abf.time.sleep
         class R:
             status = 200
             headers = {}
@@ -1549,9 +1549,9 @@ class TestInputAndShapeHardening(unittest.TestCase):
             if calls["n"] == 1:
                 raise hc.IncompleteRead(b"partial", 100)
             return R()
-        abf.urllib.request.urlopen = flaky
+        abf.open_request = flaky
         abf.time.sleep = lambda _s: None
-        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig_open)
+        self.addCleanup(setattr, abf, "open_request", orig_open)
         self.addCleanup(setattr, abf.time, "sleep", orig_sleep)
         status, _, _ = abf.http("https://example.invalid/x")
         self.assertEqual(status, 200)
@@ -1658,17 +1658,17 @@ class TestFourthReview(unittest.TestCase):
 
     def test_a_truncated_error_page_is_not_a_crash(self):
         import http.client as hc
-        orig_open = abf.urllib.request.urlopen
+        orig_open = abf.open_request
         def boom(req, timeout=None):
             err = abf.urllib.error.HTTPError("u", 502, "bad gateway", {}, None)
             # HTTPError.read is set per instance, so patch the instance, not the class
             err.read = lambda: (_ for _ in ()).throw(hc.IncompleteRead(b"", 10))
             raise err
-        abf.urllib.request.urlopen = boom
+        abf.open_request = boom
         try:
             status, _, body = abf.http("https://example.invalid/x", attempts=1)
         finally:
-            abf.urllib.request.urlopen = orig_open
+            abf.open_request = orig_open
         self.assertEqual(status, 502)
         self.assertEqual(body, "")
 
@@ -1706,13 +1706,13 @@ class TestSecurityAudit(unittest.TestCase):
 
     def _attempts(self, tool):
         calls = {"n": 0}
-        orig_open, orig_sleep = abf.urllib.request.urlopen, abf.time.sleep
+        orig_open, orig_sleep = abf.open_request, abf.time.sleep
         def boom(req, timeout=None):
             calls["n"] += 1
             raise abf.urllib.error.HTTPError("u", 502, "bad gateway", {}, None)
-        abf.urllib.request.urlopen = boom
+        abf.open_request = boom
         abf.time.sleep = lambda _s: None
-        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig_open)
+        self.addCleanup(setattr, abf, "open_request", orig_open)
         self.addCleanup(setattr, abf.time, "sleep", orig_sleep)
         client = abf.MCP("https://example.invalid/mcp")
         with self.assertRaises(RuntimeError):
@@ -1742,9 +1742,9 @@ class TestSecurityAudit(unittest.TestCase):
             def read(self, *a): return b"x" * (abf.MAX_BODY + 10)
             def __enter__(self): return self
             def __exit__(self, *a): return False
-        orig = abf.urllib.request.urlopen
-        abf.urllib.request.urlopen = lambda *a, **k: Huge()
-        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig)
+        orig = abf.open_request
+        abf.open_request = lambda *a, **k: Huge()
+        self.addCleanup(setattr, abf, "open_request", orig)
         with self.assertRaises(RuntimeError) as ctx:
             abf.http("https://example.invalid/x", attempts=1)
         self.assertIn("exceeded", str(ctx.exception))
@@ -1851,13 +1851,13 @@ class TestCompletenessHonesty(unittest.TestCase):
         self.assertEqual(split["listed"], [])
 
     def test_attempts_zero_is_clamped(self):
-        orig = abf.urllib.request.urlopen
+        orig = abf.open_request
         def boom(req, timeout=None):
             raise OSError("reset")
-        abf.urllib.request.urlopen = boom
+        abf.open_request = boom
         orig_sleep = abf.time.sleep
         abf.time.sleep = lambda _s: None
-        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig)
+        self.addCleanup(setattr, abf, "open_request", orig)
         self.addCleanup(setattr, abf.time, "sleep", orig_sleep)
         with self.assertRaises(OSError):
             abf.http("https://example.invalid/x", attempts=0)
@@ -2199,6 +2199,65 @@ class TestTrustLayer(unittest.TestCase):
         self.assertIn("payout_track_record", payload["trust_layer"]["paid_only"])
         self.assertEqual(payload["unverified"]["count"], 2)
         self.assertEqual(payload["unverified"]["states"], ["degraded", "stale"])
+
+
+class TestRedirects(unittest.TestCase):
+    """urllib follows redirects by default; a 303 would drop the POST body silently."""
+
+    def test_cross_host_redirect_is_refused(self):
+        handler = abf.SameHostRedirects()
+        req = abf.urllib.request.Request("https://a.example/mcp",
+                                         data=b"{}", method="POST")
+        with self.assertRaises(abf.urllib.error.HTTPError) as ctx:
+            handler.redirect_request(req, None, 302, "Found", {},
+                                     "https://b.example/mcp")
+        self.assertIn("another host refused", str(ctx.exception))
+
+    def test_same_host_redirect_is_followed(self):
+        handler = abf.SameHostRedirects()
+        req = abf.urllib.request.Request("https://a.example/mcp")
+        followed = handler.redirect_request(req, None, 302, "Found", {},
+                                            "https://a.example/mcp2")
+        self.assertIsNotNone(followed)
+
+    def test_a_live_cross_port_redirect_never_reaches_the_second_server(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        hits = []
+
+        class Target(BaseHTTPRequestHandler):
+            def do_GET(self):
+                hits.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+            def log_message(self, *a):
+                pass
+
+        target = HTTPServer(("127.0.0.1", 0), Target)
+        threading.Thread(target=target.serve_forever, daemon=True).start()
+        self.addCleanup(target.shutdown)
+        self.addCleanup(target.server_close)
+        target_url = "http://127.0.0.1:%d/elsewhere" % target.server_address[1]
+
+        class Redirector(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", target_url)
+                self.end_headers()
+            def log_message(self, *a):
+                pass
+
+        source = HTTPServer(("127.0.0.1", 0), Redirector)
+        threading.Thread(target=source.serve_forever, daemon=True).start()
+        self.addCleanup(source.shutdown)
+        self.addCleanup(source.server_close)
+
+        status, _, _ = abf.http("http://127.0.0.1:%d/x" % source.server_address[1],
+                                attempts=1)
+        self.assertEqual(status, 302)      # reported, not followed
+        self.assertEqual(hits, [])         # the other server was never called
 
 
 class TestFixtureShape(unittest.TestCase):
