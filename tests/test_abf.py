@@ -2019,6 +2019,58 @@ class TestStrictFriction(unittest.TestCase):
         self.assertIn("tags overlap", buf.getvalue())
 
 
+class TestPooledRewards(unittest.TestCase):
+    """est_usd is a pot for shared_pool / ranked_prizes, not one worker's payout."""
+
+    POOL = {"id": "p", "est_usd": 100, "source": "s", "reward_basis": "shared_pool",
+            "pool_amount": 100, "per_worker_usd": None, "title": "t"}
+    RANKED = {"id": "r", "est_usd": 125, "source": "s", "reward_basis": "ranked_prizes",
+              "pool_amount": 125, "title": "t"}
+    SINGLE = {"id": "s", "est_usd": 50, "source": "s", "title": "t"}
+
+    def test_basis_detection(self):
+        self.assertTrue(abf.is_pooled(self.POOL))
+        self.assertTrue(abf.is_pooled(self.RANKED))
+        self.assertFalse(abf.is_pooled(self.SINGLE))          # absent means one winner
+        self.assertFalse(abf.is_pooled({"reward_basis": "fixed"}))
+        self.assertFalse(abf.is_pooled({"reward_basis": None}))
+
+    def test_the_cell_is_marked_and_footnoted(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.print_bounties([self.POOL, self.SINGLE])
+        out = buf.getvalue()
+        self.assertIn("$100*", out)
+        self.assertIn("$50 ", out)          # unmarked
+        self.assertIn("pool split between winners", out)
+
+    def test_no_footnote_without_a_pooled_row(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.print_bounties([self.SINGLE])
+        self.assertNotIn("pool split", buf.getvalue())
+
+    def _reachable(self, items, as_json=False):
+        orig = abf.load_feed_doc
+        abf.load_feed_doc = lambda: {"items": items, "stats": {}}
+        self.addCleanup(setattr, abf, "load_feed_doc", orig)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.cmd_reachable(argparse.Namespace(limit=None, max_subs=50,
+                                                 strict=False, json=as_json))
+        return buf.getvalue()
+
+    def test_reachable_counts_the_pooled_share(self):
+        out = self._reachable([self.POOL, self.SINGLE])
+        self.assertIn("is a pool split between winners", out)
+
+    def test_json_separates_pooled_from_the_total(self):
+        payload = json.loads(self._reachable([self.POOL, self.SINGLE], as_json=True))
+        self.assertEqual(payload["pooled"]["count"], 1)
+        self.assertEqual(payload["pooled"]["usd"], 100.0)
+        self.assertEqual(payload["winnable"]["usd"], 150.0)   # unchanged, just labelled
+
+
 class TestFixtureShape(unittest.TestCase):
     """fixtures/earn-now.sample.json is a real captured response."""
 

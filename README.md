@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 211 tests, ~2s, network is blocked, not just unused
+python3 abf.py selftest            # 216 tests, ~2s, network is blocked, not just unused
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -361,6 +361,23 @@ number, and a line naming what the stricter definition would remove. `--json` ca
 Tags overlap, so the per-tag counts can sum to more than the number of items dropped; the
 line says `tags overlap` when they do, rather than printing arithmetic that does not add up.
 
+### A pool is not a payout
+
+`reward_basis` says how `est_usd` was arrived at. It is absent on single-winner listings —
+the common case, where the number is what you get. On `shared_pool` and `ranked_prizes` it
+is the whole pot:
+
+```
+taskmarket:TSK-RC1MAYQ3   reward_basis=shared_pool   pool_amount=1.0   per_worker_usd=null
+superteam:raptorx-...     reward_basis=ranked_prizes pool_amount=125.0 per_worker_usd=null
+```
+
+`per_worker_usd` is null in both, so the real share cannot be recovered — a $1 pool split
+between 159 submitters is not a $1 bounty. Rather than guess, the row is marked `*`, the
+footnote says what the mark means, and `--json` reports `pooled: {count, usd}` separately
+so a caller can subtract it if it wants to. The total is not silently adjusted: changing a
+number is a worse failure than annotating one.
+
 ## Two transport details worth knowing
 
 **Retries.** A TLS reset used to kill a command outright. `http()` now retries a transport
@@ -396,7 +413,7 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1418 lines, 1150 of them code. The transport — handshake, conditional session
+`abf.py` is 1446 lines, 1172 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
@@ -407,7 +424,7 @@ echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one si
 non-loopback address, so "no network" is enforced rather than promised: a test that
 strays out gets an AssertionError naming the address in milliseconds instead of a
 slow, flaky pass. It boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
-stateful (issues and requires a session id) and stateless (what the live server does) and runs 211 tests
+stateful (issues and requires a session id) and stateless (what the live server does) and runs 216 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

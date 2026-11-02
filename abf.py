@@ -240,6 +240,15 @@ def money(value):
     return "$%g" % amount
 
 
+def is_pooled(item):
+    """True when est_usd is a pot split between winners rather than one payout.
+
+    `shared_pool` and `ranked_prizes` both report the total; per_worker_usd is null in
+    the feed, so the per-worker figure cannot be recovered — only flagged.
+    """
+    return str(item.get("reward_basis") or "").lower() in POOLED_BASIS
+
+
 def usd_total(value):
     """Summary format: thousands separators, no exponent, no trailing zeros."""
     try:
@@ -258,6 +267,9 @@ FRICTION = ("kyc", "stake", "bond", "purchase", "human_only")
 # agent runtimes cannot create one unattended. Kept separate so the default number does
 # not move; --strict folds it in.
 SIGNUP = ("agent_account",)
+# reward_basis values where est_usd is the whole pot, not what one worker receives.
+# Absent means a single winner, which is the only case where the two are the same number.
+POOLED_BASIS = ("shared_pool", "ranked_prizes")
 USD_LIKE = ("USD", "USDC", "OUSD", "USDT", "DAI")
 
 
@@ -642,19 +654,26 @@ def print_bounties(items, limit=None):
     print("%-34s %7s  %-11s %-7s %s" % ("ID", "USD", "SOURCE", "CLOSES", "TITLE"))
     print("-" * 108)
     shown = 0
+    pooled = 0
     for it in items:
         if not isinstance(it, dict):
             continue
         shown += 1
+        mark = is_pooled(it)
+        pooled += 1 if mark else 0
         print("%-34s %7s  %-11s %-7s %s" % (
             clean(it.get("id", ""), 34),
-            money(amount_of(it)),
+            money(amount_of(it)) + ("*" if mark else ""),
             clean(it.get("source", ""), 11),
             closes_label(it.get("deadline")),
             clean(it.get("title", ""), 50),
         ))
     print("")
     print("%d item(s)" % shown)
+    if pooled:
+        print("* pool split between winners, not one payout (%s); the per-worker"
+              % "/".join(POOLED_BASIS))
+        print("  figure is not in the feed, so this row is worth less than it reads")
 
 def feed_items(data):
     """Return the item list from any of the three response shapes, or raise."""
@@ -1223,6 +1242,7 @@ def cmd_reachable(args):
     # are only here because an account on the source platform does not count as friction
     signup_only = [it for it in split["winnable"]
                    if set(requires_of(it)) & set(SIGNUP)]
+    pooled = [it for it in split["winnable"] if is_pooled(it)]
 
     if args.json:
         emit({
@@ -1233,6 +1253,7 @@ def cmd_reachable(args):
             "returned": len(page),
             "friction": sorted(friction),
             "signup_only": {"count": len(signup_only), "usd": total_usd(signup_only)},
+            "pooled": {"count": len(pooled), "usd": total_usd(pooled)},
             "dead_sources": sorted(split["dead"]),
             "payout_evidence": split["health"],
             "items": page,
@@ -1270,6 +1291,13 @@ def cmd_reachable(args):
             "; dead source: " + dead_sources if split["dead"] else ""))
     row("winnable", split["winnable"],
         "-%d  crowded (%d+ submissions)" % (len(dropped_crowd), max_subs))
+
+    if pooled:
+        print("")
+        print("%d of those %d is a pool split between winners, not one payout ($%s of"
+              % (len(pooled), len(split["winnable"]), usd_total(total_usd(pooled))))
+        print("the total); marked * below. per_worker_usd is null, so the real share")
+        print("cannot be recovered from the feed")
 
     if signup_only and not strict:
         print("")
