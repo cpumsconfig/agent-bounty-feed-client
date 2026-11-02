@@ -20,6 +20,7 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -414,8 +415,27 @@ def load_feed():
     return load_feed_doc().get("items", [])
 
 
+_MERGE_CACHE = {}
+_MERGE_LOCK = threading.Lock()
+
+
 def merged_rate(owner, repo):
-    """Merged PRs per 100 closed ones. Falls back to a smaller page on huge repos."""
+    """Merged PRs per 100 closed ones. Falls back to a smaller page on huge repos.
+
+    Cached per (owner, repo) for the life of the process: a board sweep often has four
+    or five issues from the same repository, and each uncached call costs a 100-PR page.
+    """
+    key = (owner, repo)
+    with _MERGE_LOCK:
+        if key in _MERGE_CACHE:
+            return _MERGE_CACHE[key]
+    result = _merged_rate_uncached(owner, repo)
+    with _MERGE_LOCK:
+        _MERGE_CACHE[key] = result
+    return result
+
+
+def _merged_rate_uncached(owner, repo):
     last = None
     for size in (100, 30, 10):
         try:
@@ -473,7 +493,12 @@ def check_issue(owner, repo, number):
 
     try:
         prs = linked_prs(owner, repo, number)
-    except (RuntimeError, ValueError):
+    except (RuntimeError, ValueError) as exc:
+        text = str(exc)
+        # a rate limit or a missing repo will fail the same way twice, and Search has
+        # its own, much smaller quota (10/min unauthenticated): do not fall back
+        if "rate limit" in text.lower() or "GitHub 404" in text or "GitHub 403" in text:
+            raise
         prs = searched_prs(owner, repo, number)   # noisier, but better than nothing
 
     merged, sample, per_hundred = merged_rate(owner, repo)
@@ -741,7 +766,10 @@ def cmd_watch(args):
         try:
             items = load_feed()
         except Exception as exc:      # a bad body or a socket error must not end the loop
-            print("[%s] feed error: %s" % (stamp(), exc))
+            if as_json:
+                print(json.dumps({"event": "error", "error": str(exc)}), flush=True)
+            else:
+                print("[%s] feed error: %s" % (stamp(), exc), flush=True)
             if args.once:
                 return
             time.sleep(args.interval)
@@ -751,7 +779,7 @@ def cmd_watch(args):
                           args.exclude_requires, args.closes_within)
         if first_pass:
             if as_json:
-                print(json.dumps({"event": "first_pass", "matched": len(fresh)}))
+                print(json.dumps({"event": "first_pass", "matched": len(fresh)}), flush=True)
             else:
                 print("[%s] first pass: %d item(s) match, recording state (nothing reported)"
                       % (stamp(), len(fresh)))
@@ -767,9 +795,11 @@ def cmd_watch(args):
                         verdict, why = "error", str(exc)[:70]
                 if as_json:
                     # one object per line, so another agent can pipe this
+                    # flush: in a pipe stdout is block-buffered, so an unflushed line
+                    # can sit for hours while the consumer waits
                     print(json.dumps({"event": "new", "verdict": verdict, "why": why,
                                       "usd": amount_of(it), "item": it},
-                                     ensure_ascii=False))
+                                     ensure_ascii=False), flush=True)
                     continue
                 print("[%s] NEW  %-8s %-12s %s" % (
                     stamp(), money(amount_of(it)), verdict.upper(),

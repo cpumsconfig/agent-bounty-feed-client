@@ -291,6 +291,7 @@ class TestCompetitionCheck(unittest.TestCase):
         self.assertIn("0 PRs", why)
 
     def test_a_404_is_not_retried_with_a_smaller_page(self):
+        abf._MERGE_CACHE.clear()
         calls = []
         orig = abf.gh_get
         def boom(path):
@@ -305,6 +306,7 @@ class TestCompetitionCheck(unittest.TestCase):
         self.assertEqual(len(calls), 1)   # not three: quota is 60/hour
 
     def test_a_transport_error_still_falls_back(self):
+        abf._MERGE_CACHE.clear()
         calls = []
         orig = abf.gh_get
         def flaky(path):
@@ -1265,6 +1267,49 @@ class TestReviewFixes(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(calls["n"], 1)
 
+    def test_merged_rate_is_cached_per_repo(self):
+        abf._MERGE_CACHE.clear()
+        calls = []
+        orig = abf.gh_get
+        abf.gh_get = lambda path: (calls.append(path), [{"merged_at": "x"}] * 3)[1]
+        try:
+            first = abf.merged_rate("owner", "repo")
+            second = abf.merged_rate("owner", "repo")
+        finally:
+            abf.gh_get = orig
+            abf._MERGE_CACHE.clear()
+        self.assertEqual(first, second)
+        self.assertEqual(len(calls), 1)      # one 100-PR page, not two
+
+    def test_a_rate_limit_is_not_swallowed_into_the_fallback(self):
+        # falling back would hit Search, whose unauthenticated quota is 10/min
+        searched = []
+        orig_linked, orig_searched = abf.linked_prs, abf.searched_prs
+        def limited(owner, repo, number):
+            raise RuntimeError("GitHub rate limit hit. Set GITHUB_TOKEN to raise it.")
+        abf.linked_prs = limited
+        abf.searched_prs = lambda o, r, n: searched.append((o, r, n)) or 0
+        try:
+            with self.assertRaises(RuntimeError):
+                abf.check_issue("o", "r", 5)
+        finally:
+            abf.linked_prs, abf.searched_prs = orig_linked, orig_searched
+        self.assertEqual(searched, [])
+
+    def test_a_404_also_skips_the_fallback(self):
+        searched = []
+        orig_linked, orig_searched = abf.linked_prs, abf.searched_prs
+        def missing(owner, repo, number):
+            raise RuntimeError("GitHub 404 on /repos/o/r/issues/5/timeline")
+        abf.linked_prs = missing
+        abf.searched_prs = lambda o, r, n: searched.append((o, r, n)) or 0
+        try:
+            with self.assertRaises(RuntimeError):
+                abf.check_issue("o", "r", 5)
+        finally:
+            abf.linked_prs, abf.searched_prs = orig_linked, orig_searched
+        self.assertEqual(searched, [])
+
     def test_linked_prs_counts_only_cross_references(self):
         events = [
             {"event": "commented", "body": "looks good"},
@@ -1274,7 +1319,22 @@ class TestReviewFixes(unittest.TestCase):
             {"event": "cross-referenced", "source": {"issue": {"number": 13}}},   # an issue, not a PR
         ]
         orig = abf.gh_get
-        abf.gh_get = lambda path: events if "page=1" in path else []
+        # endswith, not "in": "page=1" is a substring of "per_page=100"
+        abf.gh_get = lambda path: events if path.endswith("page=1") else []
+        try:
+            self.assertEqual(abf.linked_prs("o", "r", 5), 2)
+        finally:
+            abf.gh_get = orig
+
+    def test_linked_prs_dedups_across_pages(self):
+        # a PR can cross-reference an issue more than once; pages must not double-count
+        def pr(number):
+            return {"event": "cross-referenced",
+                    "source": {"issue": {"number": number, "pull_request": {}}}}
+        page1 = [pr(11)] * 100                 # full page forces a second request
+        page2 = [pr(11), pr(12)]               # 11 repeats, 12 is new
+        orig = abf.gh_get
+        abf.gh_get = lambda path: page1 if path.endswith("page=1") else page2
         try:
             self.assertEqual(abf.linked_prs("o", "r", 5), 2)
         finally:
