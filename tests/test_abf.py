@@ -426,7 +426,7 @@ class TestTransportResilience(unittest.TestCase):
     class _Resp:
         status = 200
         headers = {}
-        def read(self):
+        def read(self, *a):
             return b'{"ok": true}'
         def __enter__(self):
             return self
@@ -477,7 +477,7 @@ class TestRpcParsing(unittest.TestCase):
 
     def _client(self, body, ctype="text/event-stream"):
         client = abf.MCP("http://example.invalid/mcp")
-        def fake_post(payload):
+        def fake_post(payload, **kwargs):
             rid = payload.get("id")
             return 200, {"Content-Type": ctype}, body.replace("{ID}", str(rid))
         client._post = fake_post
@@ -496,7 +496,7 @@ class TestRpcParsing(unittest.TestCase):
     def test_an_html_body_is_reported_as_such(self):
         # a proxy error page should not surface as "Expecting value: line 1 column 1"
         client = abf.MCP("http://example.invalid/mcp")
-        client._post = lambda payload: (200, {"Content-Type": "text/html"},
+        client._post = lambda payload, **kwargs: (200, {"Content-Type": "text/html"},
                                         "<html><body>blocked</body></html>")
         with self.assertRaises(RuntimeError) as ctx:
             client.rpc("tools/list")
@@ -1246,7 +1246,7 @@ class TestReviewFixes(unittest.TestCase):
 
     def test_is_error_is_not_treated_as_data(self):
         client = abf.MCP("http://example.invalid/mcp")
-        client._post = lambda payload: (200, {"Content-Type": "application/json"},
+        client._post = lambda payload, **kwargs: (200, {"Content-Type": "application/json"},
             json.dumps({"jsonrpc": "2.0", "id": payload["id"],
                         "result": {"isError": True,
                                    "content": [{"type": "text", "text": "no such bounty"}]}}))
@@ -1256,7 +1256,7 @@ class TestReviewFixes(unittest.TestCase):
 
     def test_get_handles_a_null_result(self):
         client = abf.MCP("http://example.invalid/mcp")
-        def fake_post(payload):
+        def fake_post(payload, **kwargs):
             if "id" not in payload:      # the notifications/initialized call
                 return 202, {}, ""
             return 200, {"Content-Type": "application/json"}, json.dumps(
@@ -1278,7 +1278,7 @@ class TestReviewFixes(unittest.TestCase):
         class R:
             status = 200
             headers = {}
-            def read(self): return b"{}"
+            def read(self, *a): return b"{}"
             def __enter__(self): return self
             def __exit__(self, *a): return False
         def flaky(req, timeout=None):
@@ -1364,7 +1364,7 @@ class TestReviewFixes(unittest.TestCase):
         abf.gh_get = lambda path: events if path.endswith("page=1") else []
         try:
             self.assertEqual(abf.linked_prs("o", "r", 5),
-                             {"open": 1, "merged": 1, "closed": 1})
+                             {"open": 1, "merged": 1, "closed": 1, "complete": True})
         finally:
             abf.gh_get = orig
 
@@ -1473,7 +1473,7 @@ class TestInputAndShapeHardening(unittest.TestCase):
 
     def test_get_survives_a_non_object_result(self):
         client = abf.MCP("http://example.invalid/mcp")
-        def fake_post(payload):
+        def fake_post(payload, **kwargs):
             if "id" not in payload:
                 return 202, {}, ""
             return 200, {"Content-Type": "application/json"}, json.dumps(
@@ -1491,7 +1491,7 @@ class TestInputAndShapeHardening(unittest.TestCase):
 
     def test_list_tools_survives_a_null_result(self):
         client = abf.MCP("http://example.invalid/mcp")
-        client._post = lambda payload: (200, {"Content-Type": "application/json"},
+        client._post = lambda payload, **kwargs: (200, {"Content-Type": "application/json"},
             json.dumps({"jsonrpc": "2.0", "id": payload.get("id"), "result": None}))
         self.assertEqual(client.list_tools(), [])
 
@@ -1502,7 +1502,7 @@ class TestInputAndShapeHardening(unittest.TestCase):
         class R:
             status = 200
             headers = {}
-            def read(self): return b"{}"
+            def read(self, *a): return b"{}"
             def __enter__(self): return self
             def __exit__(self, *a): return False
         def flaky(req, timeout=None):
@@ -1520,7 +1520,7 @@ class TestInputAndShapeHardening(unittest.TestCase):
 
     def test_a_string_id_still_matches(self):
         client = abf.MCP("http://example.invalid/mcp")
-        client._post = lambda payload: (200, {"Content-Type": "application/json"},
+        client._post = lambda payload, **kwargs: (200, {"Content-Type": "application/json"},
             json.dumps({"jsonrpc": "2.0", "id": str(payload["id"]), "result": {"ok": True}}))
         self.assertEqual(client.rpc("tools/list"), {"ok": True})
 
@@ -1530,7 +1530,7 @@ class TestInputAndShapeHardening(unittest.TestCase):
 
     def test_a_batch_json_array_is_read_as_messages(self):
         client = abf.MCP("http://example.invalid/mcp")
-        client._post = lambda payload: (200, {"Content-Type": "application/json"},
+        client._post = lambda payload, **kwargs: (200, {"Content-Type": "application/json"},
             json.dumps([{"jsonrpc": "2.0", "id": payload["id"], "result": {"ok": True}}]))
         self.assertEqual(client.rpc("tools/list"), {"ok": True})
 
@@ -1585,7 +1585,7 @@ class TestFourthReview(unittest.TestCase):
     def test_non_object_frames_are_skipped(self):
         for body in (json.dumps([1, 2]), json.dumps("ok")):
             client = abf.MCP("http://example.invalid/mcp")
-            client._post = lambda payload, b=body: (200, {"Content-Type": "application/json"}, b)
+            client._post = lambda payload, b=body, **kwargs: (200, {"Content-Type": "application/json"}, b)
             with self.assertRaises(RuntimeError) as ctx:
                 client.rpc("tools/list")
             self.assertIn("no JSON-RPC response", str(ctx.exception))
@@ -1660,6 +1660,85 @@ class TestOfflineGuard(unittest.TestCase):
     def test_remote_addresses_are_not(self):
         for address in (("api.github.com", 443), ("8.8.8.8", 53), ("0.0.0.0", 1) if False else ("example.org", 80)):
             self.assertFalse(test_abf_is_local(address), address)
+
+
+class TestSecurityAudit(unittest.TestCase):
+    """Fixes from the fifth review, which looked at this as a security surface."""
+
+    def _attempts(self, tool):
+        calls = {"n": 0}
+        orig_open, orig_sleep = abf.urllib.request.urlopen, abf.time.sleep
+        def boom(req, timeout=None):
+            calls["n"] += 1
+            raise abf.urllib.error.HTTPError("u", 502, "bad gateway", {}, None)
+        abf.urllib.request.urlopen = boom
+        abf.time.sleep = lambda _s: None
+        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig_open)
+        self.addCleanup(setattr, abf.time, "sleep", orig_sleep)
+        client = abf.MCP("https://example.invalid/mcp")
+        with self.assertRaises(RuntimeError):
+            client.rpc("tools/call", {"name": tool, "arguments": {}})
+        return calls["n"]
+
+    def test_a_read_only_tool_is_retried(self):
+        self.assertEqual(self._attempts("list_bounties"), 3)
+
+    def test_a_side_effecting_tool_is_not_retried(self):
+        # `mcp --tool` can name anything; repeating a write is not safe
+        self.assertEqual(self._attempts("pay_now"), 1)
+
+    def test_control_characters_never_reach_the_terminal(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.print_bounties([{"id": "x[2J", "est_usd": 1, "source": "s",
+                                 "title": "]52;c;evilhi"}])
+        out = buf.getvalue()
+        self.assertNotIn("", out)
+        self.assertNotIn("", out)
+        self.assertIn("hi", out)
+
+    def test_an_oversized_body_is_refused(self):
+        class Huge:
+            status, headers = 200, {}
+            def read(self, *a): return b"x" * (abf.MAX_BODY + 10)
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        orig = abf.urllib.request.urlopen
+        abf.urllib.request.urlopen = lambda *a, **k: Huge()
+        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig)
+        with self.assertRaises(RuntimeError) as ctx:
+            abf.http("https://example.invalid/x", attempts=1)
+        self.assertIn("exceeded", str(ctx.exception))
+
+    def test_save_state_ignores_a_planted_tmp_file(self):
+        directory = tempfile.mkdtemp()
+        target = os.path.join(directory, "s.json")
+        planted = target + ".tmp"
+        with open(planted, "w", encoding="utf-8") as fh:
+            fh.write("untouched")
+        abf.save_state(target, {"seen": {"a": 1}})
+        with open(planted, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "untouched")
+        with open(target, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"seen": {"a": 1}})
+
+    def test_feed_root_must_be_an_object(self):
+        orig = abf.http
+        abf.http = lambda *a, **k: (200, {}, "null")
+        self.addCleanup(setattr, abf, "http", orig)
+        with self.assertRaises(RuntimeError) as ctx:
+            abf.load_feed_doc()
+        self.assertIn("not an object", str(ctx.exception))
+
+    def test_integer_and_string_ids_dedupe_together(self):
+        # JSON object keys are strings; 123 and "123" must not be two different items
+        items = [{"id": 123, "est_usd": 5}]
+        self.assertEqual(abf.new_items({"123": {}}, items), [])
+        self.assertEqual(len(abf.new_items({}, items)), 1)
+
+    def test_an_item_without_an_id_is_not_reported_forever(self):
+        items = [{"est_usd": 5, "title": "no id"}]
+        self.assertEqual(abf.new_items({}, items), [])
 
 
 class TestFixtureShape(unittest.TestCase):

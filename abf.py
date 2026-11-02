@@ -20,6 +20,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -33,11 +34,25 @@ FEED_JSON = "https://dailydollar-bot.github.io/agent-bounty-feed/feed.json"
 UA = "abf-demo/1.0 (+python-stdlib)"
 TIMEOUT = 25
 RETRY_STATUS = (429, 500, 502, 503, 504)
+MAX_BODY = 16 * 1024 * 1024
+READ_ONLY_TOOLS = frozenset(("list_bounties", "get_new_bounties",
+                             "get_bounty", "get_feed_stats"))
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def clean(value, limit=None):
+    """Strip control characters from remote text before it reaches a terminal.
+
+    A feed title is third-party input. ESC sequences can repaint the screen, forge
+    output, or (OSC 52) touch the clipboard, so they never get printed verbatim.
+    """
+    text = _CONTROL_RE.sub("", str(value))
+    return text[:limit] if limit else text
 
 
 # ---------------------------------------------------------------- transport
 
-def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3):
+def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3, idempotent=True):
     hdrs = {"User-Agent": UA}
     if headers:
         hdrs.update(headers)
@@ -52,7 +67,10 @@ def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3):
     for attempt in range(attempts):
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.status, dict(resp.headers), resp.read().decode("utf-8", "replace")
+                raw = resp.read(MAX_BODY + 1)
+                if len(raw) > MAX_BODY:
+                    raise RuntimeError("response exceeded %d bytes" % MAX_BODY)
+                return resp.status, dict(resp.headers), raw.decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             try:
                 body = exc.read().decode("utf-8", "replace")
@@ -60,14 +78,14 @@ def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3):
                 body = ""      # the error page itself was truncated
             # 429 and the gateway 5xx family are transient: retry those, but a 404 is
             # an answer and must be returned as one
-            if exc.code in RETRY_STATUS and attempt + 1 < attempts:
+            if exc.code in RETRY_STATUS and attempt + 1 < attempts and idempotent:
                 wait = exc.headers.get("Retry-After") if exc.headers else None
                 time.sleep(min(float(wait), 30) if (wait or "").isdigit() else 1.5 * (attempt + 1))
                 continue
             return exc.code, dict(exc.headers), body
         except (OSError, HTTPException) as exc:   # resets, timeouts, IncompleteRead
             last = exc
-            if attempt + 1 < attempts:
+            if attempt + 1 < attempts and idempotent:
                 time.sleep(1.5 * (attempt + 1))
     raise last
 
@@ -104,26 +122,30 @@ class MCP:
         self.session_id = None
         self.next_id = 1
 
-    def _post(self, payload):
+    def _post(self, payload, idempotent=True):
         headers = {"Accept": "application/json, text/event-stream"}
         # Echo the session only if the server issued one. Stateless servers never do,
         # and sending a made-up header is what breaks clients against them.
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
-        status, hdrs, body = http(self.url, payload, headers)
+        status, hdrs, body = http(self.url, payload, headers, idempotent=idempotent)
         sid = header(hdrs, "Mcp-Session-Id")
         if sid:
             self.session_id = sid
         return status, hdrs, body
 
     def rpc(self, method, params=None):
+        # A POST is retried only when repeating it cannot change the outcome. This
+        # client forwards arbitrary tool names via `mcp --tool`, so the read-only
+        # assumption is checked per call instead of assumed for the transport.
+        idempotent = method != "tools/call" or (params or {}).get("name") in READ_ONLY_TOOLS
         rid = self.next_id
         self.next_id += 1
         payload = {"jsonrpc": "2.0", "id": rid, "method": method}
         if params is not None:
             payload["params"] = params
 
-        status, hdrs, body = self._post(payload)
+        status, hdrs, body = self._post(payload, idempotent=idempotent)
         if status >= 400:
             raise RuntimeError("HTTP %s on %s: %s" % (status, method, body[:300]))
 
@@ -439,6 +461,8 @@ def load_feed_doc():
     data = json.loads(body)
     if isinstance(data, list):
         return {"items": data, "stats": {}}
+    if not isinstance(data, dict):
+        raise RuntimeError("feed.json is a %s, not an object" % type(data).__name__)
     return data
 
 
@@ -496,6 +520,7 @@ def linked_prs(owner, repo, number, max_pages=5):
     attempts, not competitors, and one merged PR means the work is already in.
     """
     opened, merged, closed = set(), set(), set()
+    complete = False
     for page in range(1, max_pages + 1):
         events = gh_get("/repos/%s/%s/issues/%d/timeline?per_page=100&page=%d"
                         % (owner, repo, number, page))
@@ -515,8 +540,10 @@ def linked_prs(owner, repo, number, max_pages=5):
             else:
                 closed.add(num)
         if len(events) < 100:
+            complete = True
             break
-    return {"open": len(opened), "merged": len(merged), "closed": len(closed)}
+    return {"open": len(opened), "merged": len(merged), "closed": len(closed),
+            "complete": complete}
 
 
 def searched_prs(owner, repo, number):
@@ -557,6 +584,7 @@ def check_issue(owner, repo, number):
         "comments": issue["comments"],
         "prs": prs,
         "merged_prs": stats["merged"],
+        "prs_complete": stats.get("complete", True),
         "closed_prs": stats["closed"],
         "merged_last_100": per_hundred,
         "merged_sample": sample,
@@ -592,11 +620,11 @@ def print_bounties(items, limit=None):
             continue
         shown += 1
         print("%-34s %7s  %-11s %-7s %s" % (
-            str(it.get("id", ""))[:34],
+            clean(it.get("id", ""), 34),
             money(amount_of(it)),
-            str(it.get("source", ""))[:11],
+            clean(it.get("source", ""), 11),
             closes_label(it.get("deadline")),
-            str(it.get("title", ""))[:50],
+            clean(it.get("title", ""), 50),
         ))
     print("")
     print("%d item(s)" % shown)
@@ -706,12 +734,13 @@ def cmd_check(args):
         emit(result, True)
         return
 
-    print("%s#%d  %s" % (result["repo"], result["issue"], result["title"][:70]))
+    print("%s#%d  %s" % (result["repo"], result["issue"], clean(result["title"], 70)))
     print("-" * 90)
     print("state      %s, opened %s (%d days ago), %d comments"
           % (result["state"], result["created_at"], result["age_days"], result["comments"]))
-    print("competing  %d open, %d merged, %d closed unmerged"
-          % (result["prs"], result.get("merged_prs", 0), result.get("closed_prs", 0)))
+    print("competing  %d open, %d merged, %d closed unmerged%s"
+          % (result["prs"], result.get("merged_prs", 0), result.get("closed_prs", 0),
+             "" if result.get("prs_complete", True) else "  (timeline truncated)"))
     print("repo       %d of the last %d closed PRs merged (%d per 100)"
           % (result["merged_count"], result["merged_sample"], result["merged_last_100"]))
     print()
@@ -779,10 +808,20 @@ def check_board(args):
             print("  -> %s#%d  %s" % (r["repo"], r["issue"], r["why"]))
 
 
+def item_key(item):
+    """State keys are JSON object keys, so they are strings; normalise both sides."""
+    value = item.get("id")
+    return str(value) if value not in (None, "") else None
+
+
 def new_items(seen, items, min_usd=0.0, source=None, exclude_requires=(), closes_within=None):
-    """Items that pass the filters and whose id is not in the state map yet."""
+    """Items that pass the filters and whose id is not in the state map yet.
+
+    An item with no id cannot be deduplicated, so it is not reported as new either —
+    otherwise it would be announced on every single poll.
+    """
     kept = filter_items(items, min_usd, source, exclude_requires, closes_within)
-    return [it for it in kept if it.get("id") not in seen]
+    return [it for it in kept if item_key(it) and item_key(it) not in seen]
 
 
 def load_state(path):
@@ -800,10 +839,23 @@ def load_state(path):
 
 
 def save_state(path, state):
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+    """Write through a fresh temporary file in the same directory, then replace.
+
+    A fixed ".tmp" name could be a symlink planted in advance, and open(..., "w")
+    would follow it. mkstemp creates with O_EXCL, so that cannot happen.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".abf-", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def cmd_watch(args):
@@ -860,7 +912,7 @@ def cmd_watch(args):
                     continue
                 print("[%s] NEW  %-8s %-12s %s" % (
                     stamp(), money(amount_of(it)), verdict.upper(),
-                    (it.get("title") or "")[:60]))
+                    clean(it.get("title") or "", 60)))
                 if why:
                     print("            %s" % why)
                 if it.get("url"):
@@ -868,8 +920,9 @@ def cmd_watch(args):
 
         for it in filter_items(items, args.min_usd, args.source,
                                args.exclude_requires, args.closes_within):
-            if it.get("id"):
-                seen.setdefault(it["id"], {"first_seen": now_iso()})
+            key = item_key(it)
+            if key:
+                seen.setdefault(key, {"first_seen": now_iso()})
         state["initialized"] = True
         save_state(args.state, state)
         first_pass = False
@@ -942,6 +995,11 @@ def collect_new(client, since, max_pages=10):
         if not nxt or nxt == cursor:
             break
         cursor = nxt
+    else:
+        # ran out of pages while the server still had more: say so instead of
+        # returning a short list that looks complete
+        print("warning: stopped after %d pages with more results pending" % max_pages,
+              file=sys.stderr)
     return items
 
 
