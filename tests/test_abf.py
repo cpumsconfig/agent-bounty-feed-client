@@ -1512,6 +1512,97 @@ class TestInputAndShapeHardening(unittest.TestCase):
         self.assertIsNone(abf.parse_issue_url("https://t.example/?to=github.com/a/b/issues/7"))
 
 
+class TestFourthReview(unittest.TestCase):
+    """The watch state-machine bug and three escape hatches."""
+
+    def _watch_once(self, items, state, min_usd):
+        import argparse
+        orig = abf.load_feed
+        abf.load_feed = lambda: items
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                abf.cmd_watch(argparse.Namespace(interval=30, once=True, state=state,
+                                                 min_usd=min_usd, source=None,
+                                                 exclude_requires=(), closes_within=None,
+                                                 json=False))
+            return buf.getvalue()
+        finally:
+            abf.load_feed = orig
+
+    def test_a_big_bounty_after_an_empty_first_pass_is_reported(self):
+        # with --min-usd 500 the first run matches nothing and leaves seen empty;
+        # deriving first_pass from that swallowed the next bounty silently
+        state = os.path.join(tempfile.mkdtemp(), "s.json")
+        self._watch_once([{"id": "cheap", "est_usd": 5, "title": "cheap"}], state, 500.0)
+        out = self._watch_once([{"id": "cheap", "est_usd": 5, "title": "cheap"},
+                                {"id": "big", "est_usd": 1000, "title": "big"}], state, 500.0)
+        self.assertIn("NEW", out)
+        self.assertIn("1000", out)
+
+    def test_state_records_an_initialized_flag_and_an_iso_timestamp(self):
+        state_path = os.path.join(tempfile.mkdtemp(), "s.json")
+        self._watch_once([{"id": "a", "est_usd": 5, "title": "t"}], state_path, 0.0)
+        state = json.load(open(state_path, encoding="utf-8"))
+        self.assertTrue(state.get("initialized"))
+        self.assertRegex(state["seen"]["a"]["first_seen"], r"^\d{4}-\d{2}-\d{2}T")
+
+    def test_non_object_frames_are_skipped(self):
+        for body in (json.dumps([1, 2]), json.dumps("ok")):
+            client = abf.MCP("http://example.invalid/mcp")
+            client._post = lambda payload, b=body: (200, {"Content-Type": "application/json"}, b)
+            with self.assertRaises(RuntimeError) as ctx:
+                client.rpc("tools/list")
+            self.assertIn("no JSON-RPC response", str(ctx.exception))
+
+    def test_zero_limits_are_rejected(self):
+        for argv in (["feed", "--top", "0"], ["reachable", "--max-subs", "0"],
+                     ["earn-now", "--limit", "0"]):
+            orig = sys.argv
+            sys.argv = ["abf.py"] + argv
+            try:
+                with self.assertRaises(SystemExit):
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        abf.main()
+            finally:
+                sys.argv = orig
+
+    def test_retry_exhaustion_exits_cleanly(self):
+        # OSError that is not a URLError used to escape main() as a traceback
+        orig = abf.http
+        abf.http = lambda *a, **k: (_ for _ in ()).throw(OSError("connection reset"))
+        orig_argv = sys.argv
+        sys.argv = ["abf.py", "feed"]
+        try:
+            with self.assertRaises(SystemExit) as ctx:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    abf.main()
+            self.assertEqual(ctx.exception.code, 1)
+        finally:
+            abf.http = orig
+            sys.argv = orig_argv
+
+    def test_a_truncated_error_page_is_not_a_crash(self):
+        import http.client as hc
+        orig_open = abf.urllib.request.urlopen
+        def boom(req, timeout=None):
+            err = abf.urllib.error.HTTPError("u", 502, "bad gateway", {}, None)
+            # HTTPError.read is set per instance, so patch the instance, not the class
+            err.read = lambda: (_ for _ in ()).throw(hc.IncompleteRead(b"", 10))
+            raise err
+        abf.urllib.request.urlopen = boom
+        try:
+            status, _, body = abf.http("https://example.invalid/x", attempts=1)
+        finally:
+            abf.urllib.request.urlopen = orig_open
+        self.assertEqual(status, 502)
+        self.assertEqual(body, "")
+
+    def test_lowercase_z_parses(self):
+        self.assertIsNotNone(abf.parse_deadline("2026-11-01T12:00:00z"))
+        self.assertIsNotNone(abf.parse_deadline("2026-11-01T12:00:00.123z"))
+
+
 class TestFixtureShape(unittest.TestCase):
     """fixtures/earn-now.sample.json is a real captured response."""
 

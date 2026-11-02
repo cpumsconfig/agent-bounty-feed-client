@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 169 tests, ~1s, no network needed
+python3 abf.py selftest            # 176 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -375,7 +375,7 @@ echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one si
 ## Verify it without the internet
 
 `abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
-stateful (issues and requires a session id) and stateless (what the live server does) and runs 169 tests
+stateful (issues and requires a session id) and stateless (what the live server does) and runs 176 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

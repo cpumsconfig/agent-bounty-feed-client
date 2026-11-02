@@ -54,7 +54,10 @@ def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3):
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.status, dict(resp.headers), resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", "replace")
+            try:
+                body = exc.read().decode("utf-8", "replace")
+            except (OSError, HTTPException):
+                body = ""      # the error page itself was truncated
             # 429 and the gateway 5xx family are transient: retry those, but a 404 is
             # an answer and must be returned as one
             if exc.code in RETRY_STATUS and attempt + 1 < attempts:
@@ -147,6 +150,8 @@ class MCP:
             candidates = parsed if isinstance(parsed, list) else [parsed]
 
         for msg in candidates:
+            if not isinstance(msg, dict):
+                continue      # [1,2] or a bare "keepalive" frame
             # some servers echo the id as a string; compare textually so both work
             if str(msg.get("id")) != str(rid):
                 continue
@@ -269,7 +274,7 @@ def parse_deadline(value):
     """ISO-8601 deadline string -> aware datetime, or None when absent/unparseable."""
     if not value:
         return None
-    text = str(value).replace("Z", "+00:00")
+    text = re.sub(r"[Zz]$", "+00:00", str(value).strip())
     match = re.search(r"\.([0-9]+)", text)
     if match and len(match.group(1)) not in (3, 6):
         # Python < 3.11 accepts only 3 or 6 fractional digits; pad or trim
@@ -647,7 +652,7 @@ def cmd_mcp(args):
         info.get("protocolVersion", "?"), client.session_id or "(none)"))
     print("tools (%d): %s\n" % (len(tools), ", ".join(t["name"] for t in tools)))
 
-    schema = next((t.get("inputSchema") or {} for t in tools if t["name"] == args.tool), {})
+    schema = next((t.get("inputSchema") or {} for t in tools if t.get("name") == args.tool), {})
     required = schema.get("required") or []
     if required:
         print("%s requires: %s\n" % (args.tool, ", ".join(required)))
@@ -809,9 +814,10 @@ def cmd_watch(args):
     as_json = getattr(args, "json", False)
     state = load_state(args.state)
     seen = state.setdefault("seen", {})
-    # A first run records the board instead of reporting it, so a restart does not
-    # replay every listing as "new".
-    first_pass = not seen
+    # An explicit flag, not `not seen`: with --min-usd 500 a run that matches nothing
+    # leaves seen empty, and deriving the flag from it made every later run a "first
+    # pass" too — silently recording the first big bounty without reporting it.
+    first_pass = not state.get("initialized")
 
     while True:
         try:
@@ -863,7 +869,8 @@ def cmd_watch(args):
         for it in filter_items(items, args.min_usd, args.source,
                                args.exclude_requires, args.closes_within):
             if it.get("id"):
-                seen.setdefault(it["id"], {"first_seen": stamp()})
+                seen.setdefault(it["id"], {"first_seen": now_iso()})
+        state["initialized"] = True
         save_state(args.state, state)
         first_pass = False
 
@@ -874,6 +881,11 @@ def cmd_watch(args):
 
 def stamp():
     return datetime.datetime.now().strftime("%H:%M:%S")
+
+
+def now_iso():
+    """Recorded in state files, so it has to survive a day boundary."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def cmd_get(args):
@@ -1234,8 +1246,8 @@ def main():
             ap.error("--%s must be a finite number" % name.replace("_", "-"))
     for name in ("limit", "top", "jobs", "max_subs"):
         value = getattr(args, name, None)
-        if isinstance(value, int) and value < 0:
-            ap.error("--%s cannot be negative" % name.replace("_", "-"))
+        if isinstance(value, int) and value <= 0:
+            ap.error("--%s must be at least 1" % name.replace("_", "-"))
     if hasattr(args, "exclude_requires"):
         wanted = set(parse_requires(args.exclude_requires))
         if getattr(args, "no_friction", False):
@@ -1246,7 +1258,7 @@ def main():
             setattr(args, name, None if name in ("source", "closes_within") else (() if name == "exclude_requires" else 0.0))
     try:
         args.func(args)
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, OSError, HTTPException) as exc:
         print("network error: %s" % getattr(exc, "reason", exc))
         print("hint: blocked network? export HTTPS_PROXY=http://host:port; "
               "offline checks still work: python3 abf.py selftest")
