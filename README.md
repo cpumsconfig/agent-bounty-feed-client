@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 223 tests, ~2s, network is blocked, not just unused
+python3 abf.py selftest            # 230 tests, ~2s, network is blocked, not just unused
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -336,6 +336,20 @@ on which task happened to be listed first — see issue #1.
 The third tier is an upper bound, not a promise: a source that does not report its submission
 count stays in, and the tool says so on its last line. `--json` returns all four counts.
 
+### Freshness is a field, not an assumption
+
+`stale` and `verified.degraded` are free fields that say the record was not freshly checked.
+When either is set on a listing in the final tier, the tool says so rather than presenting an
+old deadline as current:
+
+```
+1 of those 7 has degraded/stale verification; its deadline and reward are as the
+feed last saw them, not as of now
+```
+
+`--json` carries `unverified: {count, states}` and the whole `trust_layer` object, so a
+caller can decide what to do with a stale row instead of having it silently dropped.
+
 ### `--strict`: is an account on the source platform friction?
 
 The default treats `agent_account` as free — a wallet you need anyway, a signup you can do in
@@ -360,6 +374,32 @@ number, and a line naming what the stricter definition would remove. `--json` ca
 
 Tags overlap, so the per-tag counts can sum to more than the number of items dropped; the
 line says `tags overlap` when they do, rather than printing arithmetic that does not add up.
+
+### What the feed charges for, and what `reachable` rebuilds
+
+The feed states its own paywall in `trust_layer`. Free outputs carry discovery fields; five
+fields are served only by the x402 endpoint:
+
+```json
+"paid_only_fields": ["payout_track_record", "competition", "verified.how",
+                     "verification_evidence", "extra"]
+```
+
+Two of those — **`payout_track_record`** and **`competition`** — are exactly what the `alive`
+and `winnable` tiers compute. So `reachable` is a reconstruction of the paid layer from free
+data: the `0 paid / N rejected` sentence inside `eligibility`, and the issue timeline on
+GitHub. The output says which fields it stands in for, and which it does not:
+
+```
+reconstructed  payout_track_record (alive tier), competition (winnable tier)
+               paid-only in this feed; rebuilt here from eligibility prose
+               and the GitHub timeline
+not rebuilt    verified.how, verification_evidence, extra
+               also paid-only, and not approximated: absent, not zero
+```
+
+That second line is the point. Three paid fields are not approximated here, and saying
+"absent" is more useful than a guess — the same rule the rest of this file follows.
 
 ### A pool is not a payout
 
@@ -430,7 +470,7 @@ Three details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1475 lines, 1195 of them code. The transport — handshake, conditional session
+`abf.py` is 1536 lines, 1245 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
@@ -441,7 +481,7 @@ echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one si
 non-loopback address, so "no network" is enforced rather than promised: a test that
 strays out gets an AssertionError naming the address in milliseconds instead of a
 slow, flaky pass. It boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
-stateful (issues and requires a session id) and stateless (what the live server does) and runs 223 tests
+stateful (issues and requires a session id) and stateless (what the live server does) and runs 230 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

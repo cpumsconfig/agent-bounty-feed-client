@@ -254,6 +254,41 @@ def money(value):
     return "$%g" % amount
 
 
+def trust_layer_of(doc):
+    """The feed's own statement of which fields are free and which are paid-only.
+
+    Free outputs carry discovery fields; `payout_track_record` and `competition` are served
+    only by the x402 endpoint. The tiers below rebuild exactly those two from free data, so
+    the tool can say which paid fields it is standing in for instead of asserting it.
+    """
+    layer = doc.get("trust_layer") if isinstance(doc, dict) else None
+    if not isinstance(layer, dict):
+        return {"free": [], "paid_only": [], "endpoint": None}
+    free = layer.get("free_fields")
+    paid = layer.get("paid_only_fields")
+    endpoint = layer.get("paid_endpoint")
+    return {
+        "free": [f for f in free if isinstance(f, str)] if isinstance(free, list) else [],
+        "paid_only": [f for f in paid if isinstance(f, str)] if isinstance(paid, list) else [],
+        "endpoint": endpoint if isinstance(endpoint, (str, dict)) else None,
+    }
+
+
+# Which paid-only field each tier stands in for. Anything else in paid_only_fields is simply
+# not reconstructed, and the output says so rather than implying full coverage.
+RECONSTRUCTS = {"payout_track_record": "alive", "competition": "winnable"}
+
+
+def verification_state(item):
+    """'stale' / 'degraded' when the feed says the record was not freshly checked."""
+    if item.get("stale") is True:
+        return "stale"
+    verified = item.get("verified")
+    if isinstance(verified, dict) and verified.get("degraded"):
+        return "degraded"
+    return None
+
+
 def is_pooled(item):
     """True when est_usd is a pot split between winners rather than one payout.
 
@@ -1042,8 +1077,10 @@ def cmd_get(args):
     item = result.get("item") if isinstance(result.get("item"), dict) else result
     print("%s  %s" % (clean(item.get("id", "?")), clean(item.get("title", ""))))
     print("-" * 88)
-    for key in ("est_usd", "currency", "source", "network", "deadline",
-                "slots_left", "requires", "url", "first_seen"):
+    for key in ("est_usd", "currency", "source", "kind", "network", "deadline",
+                "slots_left", "requires", "reward_basis", "pool_amount",
+                "trust_layer", "stale", "verified", "verified_direct",
+                "url", "first_seen"):
         if key in item:
             value = item[key]
             if isinstance(value, (list, dict)):
@@ -1267,6 +1304,8 @@ def cmd_reachable(args):
              if str(it.get("kind") or "").lower() == "audit_contest"]
     listed_total = total_usd(split["listed"])
     audit_total = total_usd(audit)
+    layer = trust_layer_of(doc)
+    unverified = [it for it in split["winnable"] if verification_state(it)]
 
     if args.json:
         emit({
@@ -1279,6 +1318,9 @@ def cmd_reachable(args):
             "friction": sorted(friction),
             "signup_only": {"count": len(signup_only), "usd": total_usd(signup_only)},
             "pooled": {"count": len(pooled), "usd": total_usd(pooled)},
+            "unverified": {"count": len(unverified),
+                           "states": sorted({verification_state(it) for it in unverified})},
+            "trust_layer": layer,
             "dead_sources": sorted(split["dead"]),
             "payout_evidence": split["health"],
             "items": page,
@@ -1320,6 +1362,25 @@ def cmd_reachable(args):
             "; dead source: " + dead_sources if split["dead"] else ""))
     row("winnable", split["winnable"],
         "-%d  crowded (%d+ submissions)" % (len(dropped_crowd), max_subs))
+
+    rebuilt = [f for f in layer["paid_only"] if f in RECONSTRUCTS]
+    not_rebuilt = [f for f in layer["paid_only"] if f not in RECONSTRUCTS]
+    if rebuilt:
+        print("")
+        print("reconstructed  %s" % ", ".join(
+            "%s (%s tier)" % (f, RECONSTRUCTS[f]) for f in rebuilt))
+        print("               paid-only in this feed; rebuilt here from eligibility prose")
+        print("               and the GitHub timeline")
+    if not_rebuilt:
+        print("not rebuilt    %s" % ", ".join(not_rebuilt))
+        print("               also paid-only, and not approximated: absent, not zero")
+
+    if unverified:
+        print("")
+        print("%d of those %d has %s verification; its deadline and reward are as the"
+              % (len(unverified), len(split["winnable"]),
+                 "/".join(sorted({verification_state(it) for it in unverified}))))
+        print("feed last saw them, not as of now")
 
     if pooled:
         print("")

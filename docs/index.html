@@ -122,6 +122,17 @@ reachable   4 items  $0.6        -21  agent_account 13, kyc 9, purchase 1, expir
 <p>That same trap is what makes the board look rich. On one snapshot <strong>$50,000 of a $50,717.6 total was a single audit contest</strong> — whose own eligibility says "the prize pool is split among valid findings, so most entrants earn little or nothing". The feed's own headline total is $617.60, because it counts only <code>kind: bounty</code>. So the first line names the split instead of hiding it:</p>
 <pre><code>listed     25 items  $50,717.6   $50,000 of that is 1 audit contest(s), a pool split among findings</code></pre>
 
+<h2>What the feed charges for, and what this rebuilds</h2>
+<p>The feed states its own paywall in <code>trust_layer</code>. Five fields are served only by the x402 endpoint — and two of them are exactly what the last two tiers compute:</p>
+<pre><code>"paid_only_fields": ["payout_track_record", "competition", "verified.how",
+                     "verification_evidence", "extra"]</code></pre>
+<pre><code>reconstructed  payout_track_record (alive tier), competition (winnable tier)
+               paid-only in this feed; rebuilt here from eligibility prose
+               and the GitHub timeline
+not rebuilt    verified.how, verification_evidence, extra
+               also paid-only, and not approximated: absent, not zero</code></pre>
+<p class="muted">The second line matters more than the first. Three paid fields are not approximated, and the tool says so instead of guessing — the same rule that makes the tiers worth reading.</p>
+
 <h2>Filter out work you cannot start</h2>
 <p>Half of any board needs KYC, a stake, a bond, a purchase, or a human. One flag removes all of it — on the current board, 25 listings become 15:</p>
 <pre><code>$ python3 abf.py earn-now --no-friction

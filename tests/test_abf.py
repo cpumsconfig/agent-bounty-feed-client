@@ -2132,6 +2132,75 @@ class TestPooledRewards(unittest.TestCase):
         self.assertEqual(payload["winnable"]["usd"], 150.0)   # unchanged, just labelled
 
 
+class TestTrustLayer(unittest.TestCase):
+    """The feed says which fields are paid-only; two of them are what the tiers rebuild."""
+
+    DOC = {
+        "items": [{"id": "a", "est_usd": 10, "source": "s", "requires": ["wallet_evm"]},
+                  {"id": "b", "est_usd": 20, "source": "s", "requires": ["wallet_evm"],
+                   "stale": True},
+                  {"id": "c", "est_usd": 30, "source": "s", "requires": ["wallet_evm"],
+                   "verified": {"checked_at": "2026-10-31T00:00:00Z", "degraded": True}}],
+        "trust_layer": {
+            "free_fields": ["id", "est_usd"],
+            "paid_only_fields": ["payout_track_record", "competition", "verified.how",
+                                 "verification_evidence", "extra"],
+            "paid_endpoint": {"url": "https://example.invalid/v1/bounties", "protocol": "x402"},
+        },
+    }
+
+    def test_layer_is_parsed(self):
+        layer = abf.trust_layer_of(self.DOC)
+        self.assertIn("payout_track_record", layer["paid_only"])
+        self.assertIn("id", layer["free"])
+        self.assertEqual(layer["endpoint"]["protocol"], "x402")
+
+    def test_layer_absent_or_wrong_type(self):
+        for doc in ({}, {"trust_layer": None}, {"trust_layer": [1, 2]}, None):
+            layer = abf.trust_layer_of(doc)
+            self.assertEqual(layer["paid_only"], [])
+            self.assertIsNone(layer["endpoint"])
+
+    def test_verification_state(self):
+        self.assertEqual(abf.verification_state({"stale": True}), "stale")
+        self.assertEqual(abf.verification_state({"verified": {"degraded": True}}), "degraded")
+        self.assertIsNone(abf.verification_state({"verified": {"checked_at": "x"}}))
+        self.assertIsNone(abf.verification_state({"stale": False}))
+        self.assertIsNone(abf.verification_state({"verified": "nonsense"}))
+
+    def _run(self, as_json=False):
+        orig = abf.load_feed_doc
+        abf.load_feed_doc = lambda: self.DOC
+        self.addCleanup(setattr, abf, "load_feed_doc", orig)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.cmd_reachable(argparse.Namespace(limit=None, max_subs=50,
+                                                 strict=False, json=as_json))
+        return buf.getvalue()
+
+    def test_it_names_only_the_fields_it_rebuilds(self):
+        out = self._run()
+        self.assertIn("payout_track_record (alive tier)", out)
+        self.assertIn("competition (winnable tier)", out)
+
+    def test_it_says_which_paid_fields_it_does_not_rebuild(self):
+        # listing all five under "reconstructed" would claim coverage we do not have
+        out = self._run()
+        self.assertIn("not rebuilt", out)
+        self.assertIn("verification_evidence", out)
+        self.assertNotIn("verification_evidence (", out)
+
+    def test_stale_and_degraded_rows_are_counted(self):
+        out = self._run()
+        self.assertIn("has degraded/stale verification", out)
+
+    def test_json_carries_the_layer_and_the_states(self):
+        payload = json.loads(self._run(as_json=True))
+        self.assertIn("payout_track_record", payload["trust_layer"]["paid_only"])
+        self.assertEqual(payload["unverified"]["count"], 2)
+        self.assertEqual(payload["unverified"]["states"], ["degraded", "stale"])
+
+
 class TestFixtureShape(unittest.TestCase):
     """fixtures/earn-now.sample.json is a real captured response."""
 
