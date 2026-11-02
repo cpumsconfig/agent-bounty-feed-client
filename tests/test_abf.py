@@ -1483,6 +1483,16 @@ class TestInputAndShapeHardening(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(calls["n"], 2)
 
+    def test_a_string_id_still_matches(self):
+        client = abf.MCP("http://example.invalid/mcp")
+        client._post = lambda payload: (200, {"Content-Type": "application/json"},
+            json.dumps({"jsonrpc": "2.0", "id": str(payload["id"]), "result": {"ok": True}}))
+        self.assertEqual(client.rpc("tools/list"), {"ok": True})
+
+    def test_sse_strips_one_leading_space_only(self):
+        frames = abf.sse_data_frames("data:  two spaces")
+        self.assertEqual(frames, [" two spaces"])
+
     def test_a_batch_json_array_is_read_as_messages(self):
         client = abf.MCP("http://example.invalid/mcp")
         client._post = lambda payload: (200, {"Content-Type": "application/json"},

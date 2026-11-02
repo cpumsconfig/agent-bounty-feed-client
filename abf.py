@@ -81,7 +81,8 @@ def sse_data_frames(text):
     frames, buf = [], []
     for line in text.splitlines():
         if line.startswith("data:"):
-            buf.append(line[5:].lstrip())
+            chunk = line[5:]
+            buf.append(chunk[1:] if chunk.startswith(" ") else chunk)
         elif not line.strip() and buf:
             frames.append("\n".join(buf))
             buf = []
@@ -146,7 +147,8 @@ class MCP:
             candidates = parsed if isinstance(parsed, list) else [parsed]
 
         for msg in candidates:
-            if msg.get("id") != rid:
+            # some servers echo the id as a string; compare textually so both work
+            if str(msg.get("id")) != str(rid):
                 continue
             if "error" in msg:
                 raise RuntimeError("%s -> %s" % (method, msg["error"]))
