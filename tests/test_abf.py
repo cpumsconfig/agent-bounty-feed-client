@@ -16,7 +16,7 @@ import os
 import sys
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from http.server import HTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1310,33 +1310,51 @@ class TestReviewFixes(unittest.TestCase):
             abf.linked_prs, abf.searched_prs = orig_linked, orig_searched
         self.assertEqual(searched, [])
 
-    def test_linked_prs_counts_only_cross_references(self):
+    def test_linked_prs_splits_by_pr_state(self):
+        # counting every cross-reference calls 22 abandoned PRs "competition"
+        def xref(number, state, merged=None):
+            return {"event": "cross-referenced",
+                    "source": {"issue": {"number": number, "state": state,
+                                         "pull_request": {"merged_at": merged}}}}
         events = [
             {"event": "commented", "body": "looks good"},
-            {"event": "cross-referenced", "source": {"issue": {"number": 11, "pull_request": {}}}},
-            {"event": "cross-referenced", "source": {"issue": {"number": 11, "pull_request": {}}}},
-            {"event": "cross-referenced", "source": {"issue": {"number": 12, "pull_request": {}}}},
-            {"event": "cross-referenced", "source": {"issue": {"number": 13}}},   # an issue, not a PR
+            xref(11, "open"),
+            xref(11, "open"),                       # same PR twice: counted once
+            xref(12, "closed"),                     # abandoned
+            xref(13, "closed", "2026-10-01T00:00:00Z"),   # merged
+            {"event": "cross-referenced", "source": {"issue": {"number": 14}}},  # an issue
         ]
         orig = abf.gh_get
         # endswith, not "in": "page=1" is a substring of "per_page=100"
         abf.gh_get = lambda path: events if path.endswith("page=1") else []
         try:
-            self.assertEqual(abf.linked_prs("o", "r", 5), 2)
+            self.assertEqual(abf.linked_prs("o", "r", 5),
+                             {"open": 1, "merged": 1, "closed": 1})
         finally:
             abf.gh_get = orig
+
+    def test_a_merged_pr_makes_the_bounty_taken(self):
+        verdict, why = abf.judge(age_days=1, prs=0, merged=80, merged_prs=2)
+        self.assertEqual(verdict, "taken")
+        self.assertIn("merged", why)
+
+    def test_closed_unmerged_prs_do_not_crowd_the_verdict(self):
+        # 0 open PRs means nobody is competing, however many attempts were abandoned
+        verdict, _ = abf.judge(age_days=1, prs=0, merged=80, merged_prs=0)
+        self.assertEqual(verdict, "worth a look")
 
     def test_linked_prs_dedups_across_pages(self):
         # a PR can cross-reference an issue more than once; pages must not double-count
         def pr(number):
             return {"event": "cross-referenced",
-                    "source": {"issue": {"number": number, "pull_request": {}}}}
+                    "source": {"issue": {"number": number, "state": "closed",
+                                         "pull_request": {}}}}
         page1 = [pr(11)] * 100                 # full page forces a second request
         page2 = [pr(11), pr(12)]               # 11 repeats, 12 is new
         orig = abf.gh_get
         abf.gh_get = lambda path: page1 if path.endswith("page=1") else page2
         try:
-            self.assertEqual(abf.linked_prs("o", "r", 5), 2)
+            self.assertEqual(abf.linked_prs("o", "r", 5)["closed"], 2)
         finally:
             abf.gh_get = orig
 
@@ -1363,6 +1381,125 @@ class TestReviewFixes(unittest.TestCase):
             abf.load_feed, abf.time.sleep = orig_feed, orig_sleep
         line = buf.getvalue().strip()
         self.assertEqual(json.loads(line)["event"], "first_pass")
+
+
+class TestInputAndShapeHardening(unittest.TestCase):
+    """Everything in this class came from a third review; each test pins one crash."""
+
+    def _main(self, argv):
+        orig = sys.argv
+        sys.argv = ["abf.py"] + argv
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                abf.main()
+        finally:
+            sys.argv = orig
+
+    def test_nan_min_usd_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            self._main(["feed", "--min-usd", "nan"])
+
+    def test_negative_limit_is_rejected(self):
+        with self.assertRaises(SystemExit):
+            self._main(["feed", "--top", "-1"])
+
+    def test_state_file_holding_a_list_is_ignored(self):
+        import tempfile
+        path = os.path.join(tempfile.mkdtemp(), "s.json")
+        for payload in ("[]", "null", '{"seen": []}'):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+            state = abf.load_state(path)
+            self.assertIsInstance(state, dict)
+            self.assertIsInstance(state.get("seen"), dict)
+
+    def test_feed_failure_raises_instead_of_exiting(self):
+        # SystemExit derives from BaseException, so watch's except Exception misses it
+        orig = abf.http
+        abf.http = lambda *a, **k: (503, {}, "")
+        try:
+            with self.assertRaises(RuntimeError):
+                abf.load_feed_doc()
+        finally:
+            abf.http = orig
+
+    def test_earn_now_accepts_a_bare_array(self):
+        orig = abf.http
+        abf.http = lambda *a, **k: (200, {}, json.dumps([{"id": "x", "est_usd": 3}]))
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                abf.cmd_earn_now(argparse.Namespace(min_usd=0.0, source=None,
+                                                    exclude_requires=(), closes_within=None,
+                                                    limit=None, json=True))
+        finally:
+            abf.http = orig
+        self.assertEqual(json.loads(buf.getvalue())["count"], 1)
+
+    def test_get_survives_a_non_object_result(self):
+        client = abf.MCP("http://example.invalid/mcp")
+        def fake_post(payload):
+            if "id" not in payload:
+                return 202, {}, ""
+            return 200, {"Content-Type": "application/json"}, json.dumps(
+                {"jsonrpc": "2.0", "id": payload["id"], "result": [1, 2, 3]})
+        client._post = fake_post
+        orig = abf.MCP
+        abf.MCP = lambda url=None: client
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                abf.cmd_get(argparse.Namespace(id="x", url="http://example.invalid", json=False))
+        finally:
+            abf.MCP = orig
+        self.assertIn("1", buf.getvalue())
+
+    def test_list_tools_survives_a_null_result(self):
+        client = abf.MCP("http://example.invalid/mcp")
+        client._post = lambda payload: (200, {"Content-Type": "application/json"},
+            json.dumps({"jsonrpc": "2.0", "id": payload.get("id"), "result": None}))
+        self.assertEqual(client.list_tools(), [])
+
+    def test_incomplete_read_is_retried(self):
+        import http.client as hc
+        calls = {"n": 0}
+        orig_open, orig_sleep = abf.urllib.request.urlopen, abf.time.sleep
+        class R:
+            status = 200
+            headers = {}
+            def read(self): return b"{}"
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        def flaky(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise hc.IncompleteRead(b"partial", 100)
+            return R()
+        abf.urllib.request.urlopen = flaky
+        abf.time.sleep = lambda _s: None
+        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig_open)
+        self.addCleanup(setattr, abf.time, "sleep", orig_sleep)
+        status, _, _ = abf.http("https://example.invalid/x")
+        self.assertEqual(status, 200)
+        self.assertEqual(calls["n"], 2)
+
+    def test_a_batch_json_array_is_read_as_messages(self):
+        client = abf.MCP("http://example.invalid/mcp")
+        client._post = lambda payload: (200, {"Content-Type": "application/json"},
+            json.dumps([{"jsonrpc": "2.0", "id": payload["id"], "result": {"ok": True}}]))
+        self.assertEqual(client.rpc("tools/list"), {"ok": True})
+
+    def test_short_fractional_seconds_parse(self):
+        # Python < 3.11 rejects ".12"; padding keeps the value instead of dropping it
+        self.assertIsNotNone(abf.parse_deadline("2026-11-01T12:00:00.12Z"))
+        self.assertIsNotNone(abf.parse_deadline("2026-11-01T12:00:00.1Z"))
+
+    def test_url_forms(self):
+        self.assertEqual(abf.parse_issue_url("https://GitHub.com/a/b/issues/7"), ("a", "b", 7))
+        self.assertEqual(abf.parse_issue_url("https://www.github.com/a/b/issues/7"), ("a", "b", 7))
+        self.assertEqual(abf.parse_issue_url("github.com/a/b/issues/7"), ("a", "b", 7))
+        self.assertIsNone(abf.parse_issue_url("https://notgithub.com/a/b/issues/7"))
+        self.assertIsNone(abf.parse_issue_url("https://t.example/?to=github.com/a/b/issues/7"))
 
 
 class TestFixtureShape(unittest.TestCase):

@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 154 tests, ~1s, no network needed
+python3 abf.py selftest            # 167 tests, ~1s, no network needed
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -220,14 +220,19 @@ that actually decide the answer:
 onyx-dot-app/onyx#2281  Jira Service Management Connector
 ------------------------------------------------------------------------------------------
 state      open, opened 2024-08-30 (791 days ago), 176 comments
-competing  98 PR(s) mention this issue
+competing  7 open, 10 merged, 22 closed unmerged
 repo       90 of the last 100 closed PRs merged
 
-verdict    CROWDED — 98 PRs already compete
+verdict    TAKEN — 10 PR(s) already merged on this issue
            you would be entry 99; skip it
 ```
 
-The rule is blunt on purpose: more than 10 PRs is crowded; fewer than 5 merges out of the
+The three counts are separate because they mean different things. **Open** PRs are the ones you
+would race. **Merged** PRs mean the work is already in, whatever the issue state says. **Closed
+unmerged** are abandoned attempts and count for nothing — on one real issue the split was 0 open,
+20 merged and 24 abandoned, which a single total of 44 would have described as "crowded".
+
+The rule is blunt on purpose: more than 10 open PRs is crowded; fewer than 5 merges out of the
 last 100 means the repo has stalled and the reward may never move; older than a week means
 the field is already in. Everything else is worth a look.
 
@@ -362,7 +367,7 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1199 lines, 971 of them code. The transport — handshake, conditional session
+`abf.py` is 1259 lines, 1023 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
@@ -370,7 +375,7 @@ echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one si
 ## Verify it without the internet
 
 `abf.py selftest` boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
-stateful (issues and requires a session id) and stateless (what the live server does) and runs 154 tests
+stateful (issues and requires a session id) and stateless (what the live server does) and runs 167 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

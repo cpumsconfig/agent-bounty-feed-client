@@ -25,6 +25,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http.client import HTTPException
 
 BASE = "https://agent-bounty-feed.dailydollar.workers.dev"
 MCP_URL = BASE + "/mcp"
@@ -61,7 +62,7 @@ def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3):
                 time.sleep(min(float(wait), 30) if (wait or "").isdigit() else 1.5 * (attempt + 1))
                 continue
             return exc.code, dict(exc.headers), body
-        except OSError as exc:      # URLError, TLS resets, timeouts
+        except (OSError, HTTPException) as exc:   # resets, timeouts, IncompleteRead
             last = exc
             if attempt + 1 < attempts:
                 time.sleep(1.5 * (attempt + 1))
@@ -140,7 +141,9 @@ class MCP:
                 except ValueError:
                     continue      # a keep-alive or non-JSON frame is not an error
         elif body.strip():
-            candidates = [json.loads(body)]
+            parsed = json.loads(body)
+            # a batch response is a JSON array of messages, not one message
+            candidates = parsed if isinstance(parsed, list) else [parsed]
 
         for msg in candidates:
             if msg.get("id") != rid:
@@ -165,7 +168,9 @@ class MCP:
         return result
 
     def list_tools(self):
-        return self.rpc("tools/list").get("tools", [])
+        result = self.rpc("tools/list")
+        tools = result.get("tools") if isinstance(result, dict) else None
+        return [t for t in tools if isinstance(t, dict)] if isinstance(tools, list) else []
 
     def call_tool(self, name, arguments=None):
         result = self.rpc("tools/call", {"name": name, "arguments": arguments or {}})
@@ -262,8 +267,14 @@ def parse_deadline(value):
     """ISO-8601 deadline string -> aware datetime, or None when absent/unparseable."""
     if not value:
         return None
+    text = str(value).replace("Z", "+00:00")
+    match = re.search(r"\.([0-9]+)", text)
+    if match and len(match.group(1)) not in (3, 6):
+        # Python < 3.11 accepts only 3 or 6 fractional digits; pad or trim
+        digits = (match.group(1) + "000000")[:6]
+        text = text[:match.start()] + "." + digits + text[match.end():]
     try:
-        stamp = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        stamp = datetime.datetime.fromisoformat(text)
     except ValueError:
         return None
     # "2026-11-12" parses as naive; subtracting it from an aware now() raises, so
@@ -341,20 +352,28 @@ GH_API = "https://api.github.com"
 
 
 def parse_issue_url(text):
-    """Pull (owner, repo, number) out of a GitHub issue URL, or return None."""
+    """Pull (owner, repo, number) out of a GitHub issue URL, or return None.
+
+    Parsed rather than substring-matched: `"github.com/" in text` also accepts
+    notgithub.com and misses GitHub.com, and a substring check cannot see the host.
+    """
     if not isinstance(text, str):
         return None
-    marker = "github.com/"
-    if marker not in text:
+    candidate = text.strip()
+    if "://" not in candidate:
+        candidate = "https://" + candidate
+    try:
+        parsed = urllib.parse.urlparse(candidate)
+    except ValueError:
         return None
-    rest = text.split(marker, 1)[1].strip().rstrip("/")
-    parts = rest.split("/")
+    if parsed.netloc.lower() not in ("github.com", "www.github.com"):
+        return None
+    parts = [p for p in parsed.path.split("/") if p]
     if len(parts) < 4 or parts[2] != "issues":
         return None
-    owner, repo, number = parts[0], parts[1], parts[3].split("?")[0].split("#")[0]
+    owner, repo, number = parts[0], parts[1], parts[3]
     if not number.isdigit():
         return None
-    # these two go straight into an API path; keep them to what GitHub allows
     for part in (owner, repo):
         # dots are legal in repo names (owner.github.io), so reject dot-only parts
         # explicitly rather than relying on the character class
@@ -363,15 +382,17 @@ def parse_issue_url(text):
     return owner, repo, int(number)
 
 
-def judge(age_days, prs, merged):
+def judge(age_days, prs, merged, merged_prs=0):
     """Turn three numbers into a verdict. Pure, so it is cheap to test.
 
     Thresholds come from what the board actually looked like: the busiest issues carry
     90-120 PRs, repos that still merge sit well above 5 per 100, and a week is roughly
     when a bounty's first PRs land.
     """
+    if merged_prs:
+        return "taken", "%d PR(s) already merged on this issue" % merged_prs
     if prs > 10:
-        return "crowded", "%d PRs already compete" % prs
+        return "crowded", "%d open PRs already compete" % prs
     if merged < 5:
         return "stalled", "repo merges only %d per 100 closed PRs" % merged
     if age_days > 7:
@@ -392,7 +413,8 @@ def gh_get(path):
     return json.loads(body)
 
 
-VERDICT_RANK = {"worth a look": 0, "late": 1, "stalled": 2, "crowded": 3, "error": 4}
+VERDICT_RANK = {"worth a look": 0, "late": 1, "stalled": 2, "crowded": 3,
+                "taken": 4, "error": 5}
 
 
 def rank(results):
@@ -404,7 +426,9 @@ def load_feed_doc():
     """The whole feed document, so callers can reach stats.payout_evidence too."""
     status, _, body = http(FEED_JSON)
     if status != 200:
-        sys.exit("feed.json returned HTTP %s" % status)
+        # RuntimeError, not sys.exit: SystemExit derives from BaseException and would
+        # escape watch's `except Exception` and kill the daemon
+        raise RuntimeError("feed.json returned HTTP %s" % status)
     data = json.loads(body)
     if isinstance(data, list):
         return {"items": data, "stats": {}}
@@ -455,13 +479,16 @@ def _merged_rate_uncached(owner, repo):
 
 
 def linked_prs(owner, repo, number, max_pages=5):
-    """PRs that actually link to this issue, counted from the timeline.
+    """PRs that actually link to this issue, split by what they mean for you.
 
     A text search on the issue number is unusable for small numbers: `type:pr 5 in:body`
-    matches 577 PRs in an active repo, because every "5" in every body counts. Measured
-    on Go-Hybrid#5: search says 577, the timeline says 22.
+    matches 577 PRs in an active repo, because every "5" in every body counts.
+
+    Counting every cross-reference is also wrong, in the other direction: on Go-Hybrid#5
+    the 39 linked PRs are 7 open, 10 merged and 22 closed unmerged. The 22 are abandoned
+    attempts, not competitors, and one merged PR means the work is already in.
     """
-    seen = set()
+    opened, merged, closed = set(), set(), set()
     for page in range(1, max_pages + 1):
         events = gh_get("/repos/%s/%s/issues/%d/timeline?per_page=100&page=%d"
                         % (owner, repo, number, page))
@@ -471,11 +498,18 @@ def linked_prs(owner, repo, number, max_pages=5):
             if ev.get("event") != "cross-referenced":
                 continue
             source = ((ev.get("source") or {}).get("issue") or {})
-            if "pull_request" in source and source.get("number"):
-                seen.add(source["number"])
+            num = source.get("number")
+            if "pull_request" not in source or not num:
+                continue
+            if (source.get("pull_request") or {}).get("merged_at"):
+                merged.add(num)
+            elif source.get("state") == "open":
+                opened.add(num)
+            else:
+                closed.add(num)
         if len(events) < 100:
             break
-    return len(seen)
+    return {"open": len(opened), "merged": len(merged), "closed": len(closed)}
 
 
 def searched_prs(owner, repo, number):
@@ -492,7 +526,8 @@ def check_issue(owner, repo, number):
     age_days = (datetime.datetime.now(datetime.timezone.utc) - created).days
 
     try:
-        prs = linked_prs(owner, repo, number)
+        stats = linked_prs(owner, repo, number)
+        prs = stats["open"]
     except (RuntimeError, ValueError) as exc:
         text = str(exc)
         # a rate limit or a missing repo will fail the same way twice, and Search has
@@ -500,10 +535,11 @@ def check_issue(owner, repo, number):
         if "rate limit" in text.lower() or "GitHub 404" in text or "GitHub 403" in text:
             raise
         prs = searched_prs(owner, repo, number)   # noisier, but better than nothing
+        stats = {"open": prs, "merged": 0, "closed": 0}
 
     merged, sample, per_hundred = merged_rate(owner, repo)
 
-    verdict, why = judge(age_days, prs, per_hundred)
+    verdict, why = judge(age_days, prs, per_hundred, stats["merged"])
     return {
         "repo": "%s/%s" % (owner, repo),
         "issue": number,
@@ -513,6 +549,8 @@ def check_issue(owner, repo, number):
         "age_days": age_days,
         "comments": issue["comments"],
         "prs": prs,
+        "merged_prs": stats["merged"],
+        "closed_prs": stats["closed"],
         "merged_last_100": per_hundred,
         "merged_sample": sample,
         "merged_count": merged,
@@ -561,6 +599,8 @@ def cmd_earn_now(args):
     if status != 200:
         sys.exit("earn-now returned HTTP %s: %s" % (status, body[:200]))
     data = json.loads(body)
+    if isinstance(data, list):
+        data = {"items": data}
     items = filter_items(data.get("items", []), args.min_usd, args.source,
                          args.exclude_requires, args.closes_within)
     if args.limit is not None:
@@ -623,7 +663,9 @@ def cmd_mcp(args):
 def cmd_feed(args):
     status, _, body = http(FEED_JSON)
     if status != 200:
-        sys.exit("feed.json returned HTTP %s" % status)
+        # RuntimeError, not sys.exit: SystemExit derives from BaseException and would
+        # escape watch's `except Exception` and kill the daemon
+        raise RuntimeError("feed.json returned HTTP %s" % status)
     data = json.loads(body)
     items = data if isinstance(data, list) else data.get("items", [])
     items = filter_items(items, args.min_usd, args.source, args.exclude_requires,
@@ -661,7 +703,8 @@ def cmd_check(args):
     print("-" * 90)
     print("state      %s, opened %s (%d days ago), %d comments"
           % (result["state"], result["created_at"], result["age_days"], result["comments"]))
-    print("competing  %d PR(s) mention this issue" % result["prs"])
+    print("competing  %d open, %d merged, %d closed unmerged"
+          % (result["prs"], result.get("merged_prs", 0), result.get("closed_prs", 0)))
     print("repo       %d of the last %d closed PRs merged (%d per 100)"
           % (result["merged_count"], result["merged_sample"], result["merged_last_100"]))
     print()
@@ -738,9 +781,15 @@ def new_items(seen, items, min_usd=0.0, source=None, exclude_requires=(), closes
 def load_state(path):
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
+            state = json.load(fh)
     except (OSError, ValueError):
         return {}
+    # a hand-edited or half-written file can hold [], null or {"seen": []}
+    if not isinstance(state, dict):
+        state = {}
+    if not isinstance(state.get("seen"), dict):
+        state["seen"] = {}
+    return state
 
 
 def save_state(path, state):
@@ -837,6 +886,9 @@ def cmd_get(args):
         sys.exit("no bounty returned for %r" % args.id)
     if isinstance(result, str):
         print(result)
+        return
+    if not isinstance(result, dict):
+        print(json.dumps(result, indent=2, ensure_ascii=False))
         return
     # the tool wraps the bounty: {"generated_at": ..., "item": {...}, "note": ...}
     item = result.get("item") if isinstance(result.get("item"), dict) else result
@@ -1174,6 +1226,14 @@ def main():
     p.set_defaults(func=cmd_selftest)
 
     args = ap.parse_args()
+    for name in ("min_usd", "closes_within"):
+        value = getattr(args, name, None)
+        if isinstance(value, float) and not math.isfinite(value):
+            ap.error("--%s must be a finite number" % name.replace("_", "-"))
+    for name in ("limit", "top", "jobs", "max_subs"):
+        value = getattr(args, name, None)
+        if isinstance(value, int) and value < 0:
+            ap.error("--%s cannot be negative" % name.replace("_", "-"))
     if hasattr(args, "exclude_requires"):
         wanted = set(parse_requires(args.exclude_requires))
         if getattr(args, "no_friction", False):
