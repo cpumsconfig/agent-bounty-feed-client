@@ -34,6 +34,10 @@ FEED_JSON = "https://dailydollar-bot.github.io/agent-bounty-feed/feed.json"
 UA = "abf-demo/1.0 (+python-stdlib)"
 TIMEOUT = 25
 RETRY_STATUS = (429, 500, 502, 503, 504)
+# What this client's wire assumptions were written against. A server may negotiate down to
+# an earlier version it supports, which is fine; one it negotiates that is not in here means
+# the framing could differ, and guessing is worse than stopping.
+KNOWN_PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 MAX_BODY = 16 * 1024 * 1024
 READ_ONLY_TOOLS = frozenset(("list_bounties", "get_new_bounties",
                              "get_bounty", "get_feed_stats"))
@@ -121,6 +125,7 @@ class MCP:
     def __init__(self, url=MCP_URL):
         self.url = url
         self.session_id = None
+        self.protocol = None
         self.next_id = 1
 
     def _post(self, payload, idempotent=True):
@@ -190,10 +195,19 @@ class MCP:
 
     def initialize(self):
         result = self.rpc("initialize", {
-            "protocolVersion": "2025-06-18",
+            "protocolVersion": KNOWN_PROTOCOLS[0],
             "capabilities": {},
             "clientInfo": {"name": "abf-demo", "version": "1.0"},
         })
+        if isinstance(result, dict):
+            negotiated = result.get("protocolVersion")
+            if isinstance(negotiated, str) and negotiated:
+                self.protocol = negotiated
+                if negotiated not in KNOWN_PROTOCOLS:
+                    raise RuntimeError(
+                        "server negotiated MCP %s; this client speaks %s. The framing may "
+                        "differ — extend KNOWN_PROTOCOLS only if you have checked it."
+                        % (negotiated, ", ".join(KNOWN_PROTOCOLS)))
         self.notify("notifications/initialized")
         return result
 

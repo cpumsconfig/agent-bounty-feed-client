@@ -1494,6 +1494,40 @@ class TestInputAndShapeHardening(unittest.TestCase):
             abf.MCP = orig
         self.assertIn("1", buf.getvalue())
 
+    def _client_with_protocol(self, version):
+        client = abf.MCP("http://example.invalid/mcp")
+        def fake_post(payload, **kwargs):
+            if "id" not in payload:          # notifications/initialized
+                return 202, {}, ""
+            result = {} if version is None else {"protocolVersion": version}
+            return 200, {"Content-Type": "application/json"}, json.dumps(
+                {"jsonrpc": "2.0", "id": payload["id"], "result": result})
+        client._post = fake_post
+        return client
+
+    def test_a_negotiated_protocol_is_recorded(self):
+        client = self._client_with_protocol("2025-06-18")
+        client.initialize()
+        self.assertEqual(client.protocol, "2025-06-18")
+
+    def test_negotiating_down_is_accepted(self):
+        client = self._client_with_protocol("2025-03-26")
+        client.initialize()
+        self.assertEqual(client.protocol, "2025-03-26")
+
+    def test_an_unknown_protocol_stops_instead_of_guessing(self):
+        # the framing could differ; a wrong parse is worse than a clear stop
+        client = self._client_with_protocol("2027-01-01")
+        with self.assertRaises(RuntimeError) as ctx:
+            client.initialize()
+        self.assertIn("2027-01-01", str(ctx.exception))
+        self.assertIn("2025-06-18", str(ctx.exception))
+
+    def test_a_missing_protocol_does_not_crash(self):
+        client = self._client_with_protocol(None)
+        client.initialize()
+        self.assertIsNone(client.protocol)
+
     def test_list_tools_survives_a_null_result(self):
         client = abf.MCP("http://example.invalid/mcp")
         client._post = lambda payload, **kwargs: (200, {"Content-Type": "application/json"},

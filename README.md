@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 219 tests, ~2s, network is blocked, not just unused
+python3 abf.py selftest            # 223 tests, ~2s, network is blocked, not just unused
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -415,9 +415,13 @@ POST /mcp  tools/list            -> 200, text/event-stream or application/json
 POST /mcp  tools/call            -> 200, result.content[].text holds the JSON
 ```
 
-Two details that break naive clients:
+Three details that break naive clients:
 
-1. **The session id is optional, and you must handle both cases.** If `initialize` returns
+1. **`initialize` answers with the version the server will use**, which may not be the one
+   you asked for. This client checks it against `KNOWN_PROTOCOLS` and stops if the answer is
+   unknown, because the framing could differ and a wrong parse is worse than a clear error.
+   Negotiating down to an earlier supported version is accepted.
+2. **The session id is optional, and you must handle both cases.** If `initialize` returns
    an `Mcp-Session-Id` header, every later request has to echo it. This particular server is
    stateless and returns none — note the `session (none)` above — so the client only sends
    the header when the server gave it one. Hard-coding it either way breaks half the
@@ -426,7 +430,7 @@ Two details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1461 lines, 1184 of them code. The transport — handshake, conditional session
+`abf.py` is 1475 lines, 1195 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
@@ -437,7 +441,7 @@ echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one si
 non-loopback address, so "no network" is enforced rather than promised: a test that
 strays out gets an AssertionError naming the address in milliseconds instead of a
 slow, flaky pass. It boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
-stateful (issues and requires a session id) and stateless (what the live server does) and runs 219 tests
+stateful (issues and requires a session id) and stateless (what the live server does) and runs 223 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 
