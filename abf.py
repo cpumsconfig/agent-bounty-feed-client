@@ -3,7 +3,7 @@
 
 Stdlib only. No pip install, no API key.
 
-    python3 abf.py earn-now              # free endpoint, filter >= $5
+    python3 abf.py earn-now              # free endpoint, no filter by default
     python3 abf.py mcp                   # MCP handshake + list_bounties
     python3 abf.py mcp --tool get_feed_stats
     python3 abf.py feed --top 10         # static feed.json
@@ -30,6 +30,7 @@ MCP_URL = BASE + "/mcp"
 FEED_JSON = "https://dailydollar-bot.github.io/agent-bounty-feed/feed.json"
 UA = "abf-demo/1.0 (+python-stdlib)"
 TIMEOUT = 25
+RETRY_STATUS = (429, 500, 502, 503, 504)
 
 
 # ---------------------------------------------------------------- transport
@@ -51,8 +52,14 @@ def http(url, payload=None, headers=None, timeout=TIMEOUT, attempts=3):
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return resp.status, dict(resp.headers), resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
-            # a real answer, not a transport failure: do not retry it
-            return exc.code, dict(exc.headers), exc.read().decode("utf-8", "replace")
+            body = exc.read().decode("utf-8", "replace")
+            # 429 and the gateway 5xx family are transient: retry those, but a 404 is
+            # an answer and must be returned as one
+            if exc.code in RETRY_STATUS and attempt + 1 < attempts:
+                wait = exc.headers.get("Retry-After") if exc.headers else None
+                time.sleep(min(float(wait), 30) if (wait or "").isdigit() else 1.5 * (attempt + 1))
+                continue
+            return exc.code, dict(exc.headers), body
         except OSError as exc:      # URLError, TLS resets, timeouts
             last = exc
             if attempt + 1 < attempts:
@@ -165,6 +172,11 @@ class MCP:
             return result
         # newer servers put the machine-readable payload in structuredContent;
         # older ones only ship a JSON string inside a text block
+        if result.get("isError"):
+            # MCP reports tool failures as HTTP 200 with isError, not as a JSON-RPC error
+            texts = [c.get("text", "") for c in (result.get("content") or [])
+                     if isinstance(c, dict) and c.get("type") == "text"]
+            raise RuntimeError("%s failed: %s" % (name, " ".join(texts)[:200] or "no detail"))
         if isinstance(result.get("structuredContent"), (dict, list)):
             return result["structuredContent"]
         blocks = result.get("content") or []
@@ -422,6 +434,36 @@ def merged_rate(owner, repo):
     raise RuntimeError("could not read closed PRs: %s" % str(last)[:80])
 
 
+def linked_prs(owner, repo, number, max_pages=5):
+    """PRs that actually link to this issue, counted from the timeline.
+
+    A text search on the issue number is unusable for small numbers: `type:pr 5 in:body`
+    matches 577 PRs in an active repo, because every "5" in every body counts. Measured
+    on Go-Hybrid#5: search says 577, the timeline says 22.
+    """
+    seen = set()
+    for page in range(1, max_pages + 1):
+        events = gh_get("/repos/%s/%s/issues/%d/timeline?per_page=100&page=%d"
+                        % (owner, repo, number, page))
+        if not isinstance(events, list) or not events:
+            break
+        for ev in events:
+            if ev.get("event") != "cross-referenced":
+                continue
+            source = ((ev.get("source") or {}).get("issue") or {})
+            if "pull_request" in source and source.get("number"):
+                seen.add(source["number"])
+        if len(events) < 100:
+            break
+    return len(seen)
+
+
+def searched_prs(owner, repo, number):
+    """Fallback when the timeline is unavailable. Noisy for small issue numbers."""
+    query = urllib.parse.quote("repo:%s/%s type:pr %d in:body" % (owner, repo, number))
+    return gh_get("/search/issues?q=%s&per_page=1" % query)["total_count"]
+
+
 def check_issue(owner, repo, number):
     """How contested is this issue? PRs already open on it, and is the repo alive?"""
     issue = gh_get("/repos/%s/%s/issues/%d" % (owner, repo, number))
@@ -429,8 +471,10 @@ def check_issue(owner, repo, number):
         issue["created_at"][:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
     age_days = (datetime.datetime.now(datetime.timezone.utc) - created).days
 
-    query = urllib.parse.quote("repo:%s/%s type:pr %d in:body" % (owner, repo, number))
-    prs = gh_get("/search/issues?q=%s&per_page=1" % query)["total_count"]
+    try:
+        prs = linked_prs(owner, repo, number)
+    except (RuntimeError, ValueError):
+        prs = searched_prs(owner, repo, number)   # noisier, but better than nothing
 
     merged, sample, per_hundred = merged_rate(owner, repo)
 
@@ -521,6 +565,8 @@ def cmd_mcp(args):
         arguments = json.loads(args.arguments)
     except ValueError:
         sys.exit("--arguments must be a JSON object, got: %s" % args.arguments[:80])
+    if not isinstance(arguments, dict):
+        sys.exit("--arguments must be a JSON object, got a %s" % type(arguments).__name__)
     result = client.call_tool(args.tool, arguments)
 
     if args.json:
@@ -684,6 +730,7 @@ def cmd_watch(args):
     if args.interval < 30 and not args.once:
         sys.exit("--interval must be at least 30 seconds, got %d" % args.interval)
 
+    as_json = getattr(args, "json", False)
     state = load_state(args.state)
     seen = state.setdefault("seen", {})
     # A first run records the board instead of reporting it, so a restart does not
@@ -703,8 +750,11 @@ def cmd_watch(args):
         fresh = new_items(seen, items, args.min_usd, args.source,
                           args.exclude_requires, args.closes_within)
         if first_pass:
-            print("[%s] first pass: %d item(s) match, recording state (nothing reported)"
-                  % (stamp(), len(fresh)))
+            if as_json:
+                print(json.dumps({"event": "first_pass", "matched": len(fresh)}))
+            else:
+                print("[%s] first pass: %d item(s) match, recording state (nothing reported)"
+                      % (stamp(), len(fresh)))
         else:
             for it in fresh:
                 verdict, why = "unchecked", ""
@@ -715,6 +765,12 @@ def cmd_watch(args):
                         verdict, why = row["verdict"], row["why"]
                     except Exception as exc:
                         verdict, why = "error", str(exc)[:70]
+                if as_json:
+                    # one object per line, so another agent can pipe this
+                    print(json.dumps({"event": "new", "verdict": verdict, "why": why,
+                                      "usd": amount_of(it), "item": it},
+                                     ensure_ascii=False))
+                    continue
                 print("[%s] NEW  %-8s %-12s %s" % (
                     stamp(), money(amount_of(it)), verdict.upper(),
                     (it.get("title") or "")[:60]))
@@ -747,6 +803,8 @@ def cmd_get(args):
     if args.json:
         emit(result, True)
         return
+    if result is None:
+        sys.exit("no bounty returned for %r" % args.id)
     if isinstance(result, str):
         print(result)
         return
@@ -1078,6 +1136,7 @@ def main():
     add_filter_args(p)
     p.add_argument("--state", default=".abf-watch.json", help="state file (dedupe across runs)")
     p.add_argument("--once", action="store_true", help="single pass, for cron")
+    p.add_argument("--json", action="store_true", help="one JSON object per line (JSONL)")
     p.set_defaults(func=cmd_watch)
 
     p = sub.add_parser("selftest", help="run the offline test suite (no network)")
@@ -1085,10 +1144,11 @@ def main():
     p.set_defaults(func=cmd_selftest)
 
     args = ap.parse_args()
-    if getattr(args, "no_friction", False) and not getattr(args, "exclude_requires", None):
-        args.exclude_requires = ",".join(FRICTION)
     if hasattr(args, "exclude_requires"):
-        args.exclude_requires = parse_requires(args.exclude_requires)
+        wanted = set(parse_requires(args.exclude_requires))
+        if getattr(args, "no_friction", False):
+            wanted.update(FRICTION)      # union, not override: both flags must apply
+        args.exclude_requires = tuple(sorted(wanted))
     for name in ("min_usd", "source", "exclude_requires", "closes_within"):
         if not hasattr(args, name):
             setattr(args, name, None if name in ("source", "closes_within") else (() if name == "exclude_requires" else 0.0))

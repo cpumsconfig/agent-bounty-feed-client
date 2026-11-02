@@ -11,6 +11,8 @@ import datetime
 import io
 import json
 import os
+import tempfile
+import os
 import sys
 import threading
 import unittest
@@ -1178,6 +1180,129 @@ class TestBoardConcurrency(unittest.TestCase):
                     closes_within=None, json=False, limit=10))
         finally:
             abf.load_feed, abf.check_issue = orig_feed, orig_check
+
+
+class TestReviewFixes(unittest.TestCase):
+    """One test per defect from the external review that turned out to be real."""
+
+    def test_no_friction_unions_with_exclude_requires(self):
+        # passing both used to drop --no-friction entirely
+        orig = abf.argparse.ArgumentParser.parse_args
+        abf.argparse.ArgumentParser.parse_args = lambda self, argv=None: abf.argparse.Namespace(
+            cmd="feed", func=lambda a: None, min_usd=0.0, source=None, top=1, json=False,
+            no_friction=True, exclude_requires="twitter", closes_within=None)
+        try:
+            with redirect_stdout(io.StringIO()):
+                abf.main()
+        finally:
+            abf.argparse.ArgumentParser.parse_args = orig
+
+    def test_union_is_computed_not_overridden(self):
+        reqs = set(abf.parse_requires("twitter"))
+        reqs.update(abf.FRICTION)
+        self.assertIn("twitter", reqs)
+        self.assertIn("kyc", reqs)
+
+    def test_is_error_is_not_treated_as_data(self):
+        client = abf.MCP("http://example.invalid/mcp")
+        client._post = lambda payload: (200, {"Content-Type": "application/json"},
+            json.dumps({"jsonrpc": "2.0", "id": payload["id"],
+                        "result": {"isError": True,
+                                   "content": [{"type": "text", "text": "no such bounty"}]}}))
+        with self.assertRaises(RuntimeError) as ctx:
+            client.call_tool("get_bounty", {"id": "x"})
+        self.assertIn("no such bounty", str(ctx.exception))
+
+    def test_get_handles_a_null_result(self):
+        client = abf.MCP("http://example.invalid/mcp")
+        def fake_post(payload):
+            if "id" not in payload:      # the notifications/initialized call
+                return 202, {}, ""
+            return 200, {"Content-Type": "application/json"}, json.dumps(
+                {"jsonrpc": "2.0", "id": payload["id"], "result": None})
+        client._post = fake_post
+        orig = abf.MCP
+        abf.MCP = lambda url=None: client
+        try:
+            with self.assertRaises(SystemExit):
+                with redirect_stdout(io.StringIO()):
+                    abf.cmd_get(argparse.Namespace(id="x", url="http://example.invalid",
+                                                   json=False))
+        finally:
+            abf.MCP = orig
+
+    def test_a_429_is_retried(self):
+        calls = {"n": 0}
+        orig_open, orig_sleep = abf.urllib.request.urlopen, abf.time.sleep
+        class R:
+            status = 200
+            headers = {}
+            def read(self): return b"{}"
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        def flaky(req, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise abf.urllib.error.HTTPError("u", 429, "slow down", {"Retry-After": "1"}, None)
+            return R()
+        abf.urllib.request.urlopen = flaky
+        abf.time.sleep = lambda _s: None
+        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig_open)
+        self.addCleanup(setattr, abf.time, "sleep", orig_sleep)
+        status, _, _ = abf.http("https://example.invalid/x")
+        self.assertEqual(status, 200)
+        self.assertEqual(calls["n"], 2)
+
+    def test_a_404_is_still_not_retried(self):
+        calls = {"n": 0}
+        orig_open = abf.urllib.request.urlopen
+        def boom(req, timeout=None):
+            calls["n"] += 1
+            raise abf.urllib.error.HTTPError("u", 404, "nf", {}, None)
+        abf.urllib.request.urlopen = boom
+        self.addCleanup(setattr, abf.urllib.request, "urlopen", orig_open)
+        status, _, _ = abf.http("https://example.invalid/x")
+        self.assertEqual(status, 404)
+        self.assertEqual(calls["n"], 1)
+
+    def test_linked_prs_counts_only_cross_references(self):
+        events = [
+            {"event": "commented", "body": "looks good"},
+            {"event": "cross-referenced", "source": {"issue": {"number": 11, "pull_request": {}}}},
+            {"event": "cross-referenced", "source": {"issue": {"number": 11, "pull_request": {}}}},
+            {"event": "cross-referenced", "source": {"issue": {"number": 12, "pull_request": {}}}},
+            {"event": "cross-referenced", "source": {"issue": {"number": 13}}},   # an issue, not a PR
+        ]
+        orig = abf.gh_get
+        abf.gh_get = lambda path: events if "page=1" in path else []
+        try:
+            self.assertEqual(abf.linked_prs("o", "r", 5), 2)
+        finally:
+            abf.gh_get = orig
+
+    def test_watch_json_emits_one_object_per_line(self):
+        import argparse
+        class Stop(Exception):
+            pass
+        items = [{"id": "a", "est_usd": 5, "title": "t", "url": ""}]
+        orig_feed, orig_sleep = abf.load_feed, abf.time.sleep
+        abf.load_feed = lambda: items
+        abf.time.sleep = lambda _s: (_ for _ in ()).throw(Stop())
+        state = os.path.join(tempfile.mkdtemp(), "s.json")
+        try:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                try:
+                    abf.cmd_watch(argparse.Namespace(interval=30, once=False, state=state,
+                                                     min_usd=0.0, source=None,
+                                                     exclude_requires=(), closes_within=None,
+                                                     json=True))
+                except Stop:
+                    pass
+        finally:
+            abf.load_feed, abf.time.sleep = orig_feed, orig_sleep
+        line = buf.getvalue().strip()
+        self.assertEqual(json.loads(line)["event"], "first_pass")
 
 
 class TestFixtureShape(unittest.TestCase):
