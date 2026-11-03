@@ -1965,6 +1965,37 @@ class TestOutputConsistency(unittest.TestCase):
                     "merged_sample", "merged_count"):
             self.assertIn(key, row)
 
+    def test_no_history_says_so_in_the_reason(self):
+        # "0 merged per 100" reads as a measured rate of zero when nothing was measured
+        verdict, why = abf.judge(4, 1, 0, has_history=False)
+        self.assertEqual(verdict, "worth a look")
+        self.assertIn("no merge history", why)
+        self.assertNotIn("merged/100", why)
+
+    def test_with_history_the_reason_keeps_the_rate(self):
+        _, why = abf.judge(4, 1, 40, has_history=True)
+        self.assertIn("40 merged/100", why)
+
+    def test_the_check_line_does_not_report_a_zero_rate_for_no_history(self):
+        row = {"repo": "a/b", "issue": 3, "title": "t", "state": "open",
+               "created_at": "2026-10-29", "age_days": 4, "comments": 1,
+               "prs": 1, "merged_prs": 0, "closed_prs": 0, "prs_complete": True,
+               "prs_source": "timeline", "merged_last_100": 0,
+               "merged_sample": 0, "merged_count": 0,
+               "verdict": "worth a look", "why": "ok"}
+        orig = abf.check_issue
+        abf.check_issue = lambda o, r, n: dict(row)
+        self.addCleanup(setattr, abf, "check_issue", orig)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            abf.cmd_check(argparse.Namespace(target="https://github.com/a/b/issues/3",
+                                             all=False, min_usd=0.0, source=None,
+                                             exclude_requires=(), closes_within=None,
+                                             json=False, limit=10))
+        out = buf.getvalue()
+        self.assertIn("no closed PRs to measure", out)
+        self.assertNotIn("(0 per 100)", out)
+
     def test_a_repo_without_history_is_not_called_stalled(self):
         self.assertEqual(abf.judge(1, 0, 0, has_history=False)[0], "worth a look")
         self.assertEqual(abf.judge(1, 0, 0, has_history=True)[0], "stalled")

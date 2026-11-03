@@ -532,6 +532,10 @@ def judge(age_days, prs, merged, merged_prs=0, has_history=True):
         return "stalled", "repo merges only %d per 100 closed PRs" % merged
     if age_days > 7:
         return "late", "opened %d days ago; the field is already in" % age_days
+    if not has_history:
+        # a repo with no closed PRs has a rate of nothing, not a rate of zero
+        return "worth a look", "%d PRs, no merge history to measure, %d days old" % (
+            prs, age_days)
     return "worth a look", "%d PRs, %d merged/100, %d days old" % (prs, merged, age_days)
 
 
@@ -885,8 +889,11 @@ def cmd_check(args):
     print("competing  %d open, %d merged, %d closed unmerged%s"
           % (result["prs"], result.get("merged_prs", 0), result.get("closed_prs", 0),
              "" if result.get("prs_complete", True) else "  (timeline truncated)"))
-    print("repo       %d of the last %d closed PRs merged (%d per 100)"
-          % (result["merged_count"], result["merged_sample"], result["merged_last_100"]))
+    if result.get("merged_sample"):
+        print("repo       %d of the last %d closed PRs merged (%d per 100)"
+              % (result["merged_count"], result["merged_sample"], result["merged_last_100"]))
+    else:
+        print("repo       no closed PRs to measure yet — no merge rate, not a zero one")
     print()
     print("verdict    %s — %s" % (result["verdict"].upper(), result["why"]))
     if result["verdict"] == "crowded":
