@@ -1805,15 +1805,18 @@ class TestCompletenessHonesty(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
     def test_a_truncated_timeline_yields_inconclusive(self):
+        # a full page forces a second request, which never comes: truncated, and the
+        # two PRs seen so far are not enough to decide either way
         events = [{"event": "cross-referenced",
                    "source": {"issue": {"number": n, "state": "open",
-                                        "pull_request": {}}}} for n in range(100)]
+                                        "pull_request": {}}}} for n in range(2)]
         orig_gh, orig_rate = abf.gh_get, abf.merged_rate
+        full = events * 50          # 100 events: a full page, so page 2 is requested
         def fake(path):
             if "/timeline" in path and path.endswith("page=1"):
-                return events
+                return full
             if "/timeline" in path:
-                return events
+                return full          # never short: the read never completes
             return {"created_at": "2026-10-01T00:00:00Z", "title": "t",
                     "state": "open", "comments": 0}
         abf.gh_get = fake
@@ -1823,6 +1826,43 @@ class TestCompletenessHonesty(unittest.TestCase):
         result = abf.check_issue("o", "r", 5)
         self.assertEqual(result["verdict"], "inconclusive")
         self.assertFalse(result["prs_complete"])
+
+    def _issue_with(self, stats, age_days=1):
+        orig_gh, orig_rate = abf.gh_get, abf.merged_rate
+        def fake(path):
+            if "/timeline" in path:
+                return [{"event": "cross-referenced",
+                         "source": {"issue": {"number": n, "state": "open",
+                                              "pull_request": {}}}} for n in range(1, 3)]
+            return {"created_at": "2026-11-01T00:00:00Z", "title": "t",
+                    "state": "open", "comments": 0}
+        abf.gh_get = fake
+        abf.merged_rate = lambda o, r: (50, 100, 50)
+        self.addCleanup(setattr, abf, "gh_get", orig_gh)
+        self.addCleanup(setattr, abf, "merged_rate", orig_rate)
+        orig_linked = abf.linked_prs
+        abf.linked_prs = lambda o, r, n: stats
+        self.addCleanup(setattr, abf, "linked_prs", orig_linked)
+        return abf.check_issue("o", "r", 5)
+
+    def test_truncation_does_not_downgrade_a_crowded_verdict(self):
+        # truncation can only add PRs, so 51 open ones stays crowded
+        result = self._issue_with({"open": 51, "merged": 0, "closed": 49,
+                                   "complete": False})
+        self.assertEqual(result["verdict"], "crowded")
+        self.assertIn("lower bound", result["why"])
+
+    def test_truncation_does_not_downgrade_a_taken_verdict(self):
+        result = self._issue_with({"open": 2, "merged": 1, "closed": 0,
+                                   "complete": False})
+        self.assertEqual(result["verdict"], "taken")
+        self.assertIn("lower bound", result["why"])
+
+    def test_truncation_downgrades_an_undecided_verdict(self):
+        # nothing decisive seen yet, and an unread page could hold the merged PR
+        result = self._issue_with({"open": 2, "merged": 0, "closed": 0,
+                                   "complete": False})
+        self.assertEqual(result["verdict"], "inconclusive")
 
     def test_the_search_fallback_is_never_complete(self):
         orig_linked, orig_searched = abf.linked_prs, abf.searched_prs

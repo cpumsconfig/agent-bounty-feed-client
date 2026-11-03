@@ -694,14 +694,17 @@ def check_issue(owner, repo, number):
 
     merged, sample, per_hundred = merged_rate(owner, repo)
 
+    verdict, why = judge(age_days, prs, per_hundred, stats["merged"],
+                         has_history=sample > 0)
     if not stats.get("complete", False):
-        # lower bounds are not a verdict: a merged PR could be on an unread page
-        verdict, why = ("inconclusive",
-                        "only %d of the linked PRs were readable; counts are lower bounds"
-                        % prs)
-    else:
-        verdict, why = judge(age_days, prs, per_hundred, stats["merged"],
-                             has_history=sample > 0)
+        # Truncation can only add to the counts, never subtract. A verdict that already
+        # cleared a threshold therefore holds; one that rests on an absence does not.
+        if verdict in ("crowded", "taken"):
+            why += " (lower bound; timeline truncated)"
+        else:
+            verdict, why = ("inconclusive",
+                            "only %d of the linked PRs were readable; counts are lower bounds"
+                            % prs)
     return {
         "repo": "%s/%s" % (owner, repo),
         "issue": number,
@@ -947,7 +950,7 @@ def check_board(args):
         emit(results, True)
         return
 
-    print("%-34s %7s %6s %7s  %-12s %s" % ("REPO#ISSUE", "USD", "PRs", "MERGED", "VERDICT", "TITLE"))
+    print("%-34s %7s %6s %7s  %-12s %s" % ("REPO#ISSUE", "USD", "PRs", "MRG/100", "VERDICT", "TITLE"))
     print("-" * 112)
     for r in results:
         print("%-34s %7s %6d %7d  %-12s %s" % (
