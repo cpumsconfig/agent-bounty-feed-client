@@ -30,7 +30,12 @@ from http.client import HTTPException
 
 BASE = "https://agent-bounty-feed.dailydollar.workers.dev"
 MCP_URL = BASE + "/mcp"
-FEED_JSON = "https://dailydollar-bot.github.io/agent-bounty-feed/feed.json"
+# The static feed used to live on GitHub Pages, with the worker as a fallback. On
+# 2026-11-06 the account behind Pages was suspended -- repo, issue and the Pages build
+# all went 404 -- while the worker kept serving. So the worker is primary now and the
+# mirror is the fallback: a dead source has to be skipped, not fatal.
+FEED_JSON = BASE + "/feed.json"
+FEED_JSON_MIRROR = "https://dailydollar-bot.github.io/agent-bounty-feed/feed.json"
 UA = "abf-demo/1.0 (+python-stdlib)"
 TIMEOUT = 25
 RETRY_STATUS = (429, 500, 502, 503, 504)
@@ -567,19 +572,60 @@ def rank(results):
     return sorted(results, key=lambda r: (VERDICT_RANK.get(r["verdict"], 9), r.get("prs", 0)))
 
 
+def feed_sources():
+    """Primary first, then the mirror, deduplicated. Read at call time so tests can
+    point the module globals at a local server."""
+    out, seen = [], set()
+    for url in (FEED_JSON, FEED_JSON_MIRROR):
+        if url and url not in seen:
+            seen.add(url)
+            out.append(url)
+    return out
+
+
+def fetch_feed_doc():
+    """Parse the feed from the first source that answers with a usable document.
+
+    A 404 from one host says nothing about the other, so each failure is recorded and
+    the next source is tried. Returns (url, document) so callers can say where the
+    data came from.
+    """
+    failures = []
+    network_error = None
+    for url in feed_sources():
+        try:
+            status, _, body = http(url)
+        except (OSError, HTTPException) as exc:      # resets, timeouts, truncation
+            failures.append("%s: %s" % (url, exc))
+            network_error = exc
+            continue
+        network_error = None     # a response came back, so the transport itself is fine
+        if status != 200:
+            failures.append("%s: HTTP %s" % (url, status))
+            continue
+        try:
+            data = json.loads(body)
+        except ValueError as exc:
+            failures.append("%s: %s" % (url, exc))
+            continue
+        if isinstance(data, list):
+            return url, {"items": data, "stats": {}}
+        if not isinstance(data, dict):
+            failures.append("%s: a %s, not an object" % (url, type(data).__name__))
+            continue
+        return url, data
+    if network_error is not None:
+        # Every source failed at the transport layer. Re-raise that rather than wrapping
+        # it: main() turns it into the proxy hint, which is the actual next step.
+        raise network_error
+    # RuntimeError, not sys.exit: SystemExit derives from BaseException and would
+    # escape watch's `except Exception` and kill the daemon
+    raise RuntimeError("no feed source answered: " + "; ".join(failures))
+
+
 def load_feed_doc():
     """The whole feed document, so callers can reach stats.payout_evidence too."""
-    status, _, body = http(FEED_JSON)
-    if status != 200:
-        # RuntimeError, not sys.exit: SystemExit derives from BaseException and would
-        # escape watch's `except Exception` and kill the daemon
-        raise RuntimeError("feed.json returned HTTP %s" % status)
-    data = json.loads(body)
-    if isinstance(data, list):
-        return {"items": data, "stats": {}}
-    if not isinstance(data, dict):
-        raise RuntimeError("feed.json is a %s, not an object" % type(data).__name__)
-    return data
+    return fetch_feed_doc()[1]
 
 
 def load_feed():
@@ -848,12 +894,13 @@ def cmd_mcp(args):
 
 
 def cmd_feed(args):
-    status, _, body = http(FEED_JSON)
-    if status != 200:
-        # RuntimeError, not sys.exit: SystemExit derives from BaseException and would
-        # escape watch's `except Exception` and kill the daemon
-        raise RuntimeError("feed.json returned HTTP %s" % status)
-    data = json.loads(body)
+    url, data = fetch_feed_doc()
+    primary = feed_sources()[0]
+    if url != primary:
+        # Say it out loud: reading a mirror is not the same as reading the source,
+        # and silently falling back is how a stale feed looks like a live one.
+        print("note: %s did not answer; served from %s" % (primary, url),
+              file=sys.stderr)
     items = filter_items(feed_items(data), args.min_usd, args.source,
                          args.exclude_requires, args.closes_within)
     items = items[:args.top] if args.top is not None else items

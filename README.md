@@ -1,6 +1,6 @@
 # abf — an Agent Bounty Feed client in one file
 
-Find paid work for an agent from [Agent Bounty Feed](https://dailydollar-bot.github.io/agent-bounty-feed/)
+Find paid work for an agent from [Agent Bounty Feed](https://agent-bounty-feed.dailydollar.workers.dev/)
 in one command. **Python 3.9+, standard library only, no `pip install`, no API key.**
 
 > Rendered version of this page: **https://cpumsconfig.github.io/agent-bounty-feed-client/**
@@ -27,7 +27,7 @@ Ten commands, all implemented here:
 From the repo root — there is no install step:
 
 ```bash
-python3 abf.py selftest            # 239 tests, ~2s, network is blocked, not just unused
+python3 abf.py selftest            # 249 tests, ~2s, network is blocked, not just unused
 python3 abf.py earn-now --min-usd 5
 ```
 
@@ -165,10 +165,14 @@ Call `get_new_bounties` with no arguments and the client prints
 python3 abf.py feed --top 10
 ```
 
-`feed.json` is a static file on GitHub Pages, so it survives the Worker being down.
-It carries the full inventory — 25 entries totalling $617.60 at the time of writing — not
-just the filtered top-15 that `/earn-now` returns. The largest single line is a $50,000
-audit *prize pool* (Cantina), not a per-researcher payout, so read the amounts rather than
+`feed.json` is served by the Worker and mirrored on GitHub Pages, and the client tries them
+in that order. A 404 from one host says nothing about the other, so a dead source is skipped
+and named on stderr rather than aborting the command — the Pages copy has been returning 404
+since 2026-11-06, and `feed` still works.
+
+It carries the full inventory — 27 entries totalling $189.15 at the time of writing — not
+just the filtered top-15 that `/earn-now` returns. The largest single line is a $125
+superteam *prize pool*, not a per-researcher payout, so read the amounts rather than
 sorting by them.
 
 ---
@@ -480,7 +484,7 @@ Three details that break naive clients:
    `text/event-stream`, collect `data:` frames until a blank line and parse each one as
    a JSON-RPC message. `abf.py` does both framings and matches on the request `id`.
 
-`abf.py` is 1579 lines, 1277 of them code. The transport — handshake, conditional session
+`abf.py` is 1626 lines, 1313 of them code. The transport — handshake, conditional session
 echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one sitting.
 
 ---
@@ -491,7 +495,7 @@ echo, SSE parsing, JSON-RPC matching — is about 70 of those. Read it in one si
 non-loopback address, so "no network" is enforced rather than promised: a test that
 strays out gets an AssertionError naming the address in milliseconds instead of a
 slow, flaky pass. It boots `tests/mock_mcp.py` on an ephemeral port, in both variants:
-stateful (issues and requires a session id) and stateless (what the live server does) and runs 239 tests
+stateful (issues and requires a session id) and stateless (what the live server does) and runs 249 tests
 against the real client code — handshake, session echo, SSE framing, tool calls,
 JSON output, and the `400` you get when a client forgets the session header.
 

@@ -2351,5 +2351,145 @@ class TestFixtureShape(unittest.TestCase):
             self.assertIn("requires", item)
 
 
+class TestFeedFallback(unittest.TestCase):
+    """One dead host must not take the whole feed down with it.
+
+    On 2026-11-06 the GitHub Pages copy 404'd because the account behind it was
+    suspended, while the worker kept serving. A primary that answers 404 is an answer
+    about that host, not about the feed.
+    """
+
+    PRIMARY = "https://primary.invalid/feed.json"
+    MIRROR = "https://mirror.invalid/feed.json"
+
+    def _patch(self, table):
+        orig_http = abf.http
+        orig_feed, orig_mirror = abf.FEED_JSON, abf.FEED_JSON_MIRROR
+        abf.FEED_JSON, abf.FEED_JSON_MIRROR = self.PRIMARY, self.MIRROR
+        calls = []
+
+        def fake(url, *a, **k):
+            calls.append(url)
+            got = table[url]
+            if isinstance(got, Exception):
+                raise got
+            return got[0], {}, got[1]
+
+        abf.http = fake
+        self.addCleanup(setattr, abf, "http", orig_http)
+        self.addCleanup(setattr, abf, "FEED_JSON", orig_feed)
+        self.addCleanup(setattr, abf, "FEED_JSON_MIRROR", orig_mirror)
+        return calls
+
+    def test_a_404_primary_falls_through_to_the_mirror(self):
+        calls = self._patch({
+            self.PRIMARY: (404, '{"message":"Not Found"}'),
+            self.MIRROR: (200, json.dumps({"items": [{"id": "a"}]})),
+        })
+        url, doc = abf.fetch_feed_doc()
+        self.assertEqual(url, self.MIRROR)
+        self.assertEqual(len(doc["items"]), 1)
+        self.assertEqual(calls, [self.PRIMARY, self.MIRROR])
+
+    def test_a_live_primary_never_touches_the_mirror(self):
+        calls = self._patch({
+            self.PRIMARY: (200, json.dumps({"items": [{"id": "a"}]})),
+            self.MIRROR: (500, ""),
+        })
+        url, _ = abf.fetch_feed_doc()
+        self.assertEqual(url, self.PRIMARY)
+        self.assertEqual(calls, [self.PRIMARY])
+
+    def test_both_dead_names_each_source_and_its_reason(self):
+        self._patch({self.PRIMARY: (404, ""), self.MIRROR: (410, "")})
+        with self.assertRaises(RuntimeError) as ctx:
+            abf.fetch_feed_doc()
+        msg = str(ctx.exception)
+        for piece in ("primary.invalid", "404", "mirror.invalid", "410"):
+            self.assertIn(piece, msg)
+
+    def test_a_connection_error_falls_through_too(self):
+        calls = self._patch({
+            self.PRIMARY: OSError("connection refused"),
+            self.MIRROR: (200, json.dumps({"items": []})),
+        })
+        url, _ = abf.fetch_feed_doc()
+        self.assertEqual(url, self.MIRROR)
+        self.assertEqual(len(calls), 2)
+
+    def test_all_transport_failures_re_raise_the_network_error(self):
+        # main() prints the proxy hint for OSError; wrapping it in RuntimeError would
+        # route the user to the wrong advice
+        self._patch({
+            self.PRIMARY: OSError("connection refused"),
+            self.MIRROR: OSError("connection reset"),
+        })
+        with self.assertRaises(OSError) as ctx:
+            abf.fetch_feed_doc()
+        self.assertIn("connection reset", str(ctx.exception))
+
+    def test_malformed_json_falls_through(self):
+        self._patch({
+            self.PRIMARY: (200, "<html>not json</html>"),
+            self.MIRROR: (200, json.dumps({"items": [{"id": "b"}]})),
+        })
+        url, doc = abf.fetch_feed_doc()
+        self.assertEqual(url, self.MIRROR)
+        self.assertEqual(doc["items"][0]["id"], "b")
+
+    def test_a_bare_list_is_still_wrapped(self):
+        self._patch({self.PRIMARY: (200, json.dumps([{"id": "c"}]))})
+        _, doc = abf.fetch_feed_doc()
+        self.assertEqual(doc["items"][0]["id"], "c")
+        self.assertEqual(doc["stats"], {})
+
+    def test_the_same_url_is_not_tried_twice(self):
+        orig_http = abf.http
+        orig_feed, orig_mirror = abf.FEED_JSON, abf.FEED_JSON_MIRROR
+        abf.FEED_JSON = abf.FEED_JSON_MIRROR = self.PRIMARY
+        calls = []
+
+        def fake(url, *a, **k):
+            calls.append(url)
+            return 404, {}, ""
+
+        abf.http = fake
+        self.addCleanup(setattr, abf, "http", orig_http)
+        self.addCleanup(setattr, abf, "FEED_JSON", orig_feed)
+        self.addCleanup(setattr, abf, "FEED_JSON_MIRROR", orig_mirror)
+        with self.assertRaises(RuntimeError):
+            abf.fetch_feed_doc()
+        self.assertEqual(len(calls), 1)
+
+    def test_the_feed_command_says_when_it_is_reading_the_mirror(self):
+        # falling back silently is how a mirror looks like the source
+        self._patch({
+            self.PRIMARY: (404, ""),
+            self.MIRROR: (200, json.dumps({"items": [{"id": "a", "title": "t",
+                                                      "est_usd": 3, "source": "s",
+                                                      "requires": []}]})),
+        })
+        args = argparse.Namespace(min_usd=0.0, source=None, exclude_requires=(),
+                                  closes_within=None, top=5, json=False)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            abf.cmd_feed(args)
+        self.assertIn("served from", err.getvalue())
+        self.assertIn("mirror.invalid", err.getvalue())
+
+    def test_the_feed_command_is_quiet_on_the_primary(self):
+        self._patch({
+            self.PRIMARY: (200, json.dumps({"items": [{"id": "a", "title": "t",
+                                                       "est_usd": 3, "source": "s",
+                                                       "requires": []}]})),
+        })
+        args = argparse.Namespace(min_usd=0.0, source=None, exclude_requires=(),
+                                  closes_within=None, top=5, json=False)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            abf.cmd_feed(args)
+        self.assertEqual(err.getvalue(), "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
