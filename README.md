@@ -170,8 +170,10 @@ in that order. A 404 from one host says nothing about the other, so a dead sourc
 and named on stderr rather than aborting the command — the Pages copy has been returning 404
 since 2026-11-06, and `feed` still works.
 
-It carries the full inventory — 27 entries totalling $189.15 at the time of writing — not
-just the filtered top-15 that `/earn-now` returns. The largest single line is a $125
+It carries the full inventory — 16 entries totalling $175.65 on 2026-11-07 — not
+just the filtered top-15 that `/earn-now` returns. Both numbers drift: listings expire
+and the boards post new ones on their own schedule, so read them as a snapshot, not a
+fixed size. The largest single line is a $125
 superteam *prize pool*, not a per-researcher payout, so read the amounts rather than
 sorting by them.
 
