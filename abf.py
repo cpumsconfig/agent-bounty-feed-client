@@ -838,6 +838,7 @@ def cmd_earn_now(args):
         items = items[:args.limit]
     if emit({"generated_at": data.get("generated_at"),
              "feed_age_minutes": data.get("feed_age_minutes"),
+             "excluded_not_fresh": data.get("excluded_not_fresh"),
              "min_usd": args.min_usd,
              "count": len(items),
              "items": items}, args.json):
@@ -845,6 +846,13 @@ def cmd_earn_now(args):
     print("feed generated at %s (%s min old), filter: est_usd >= %g\n"
           % (data.get("generated_at", "?"), data.get("feed_age_minutes", "?"),
              args.min_usd))
+    # The server drops items it has not re-checked recently and counts them here. An
+    # empty shortlist then means "stale", not "nothing to do" -- a distinction the
+    # empty table alone cannot carry.
+    dropped = data.get("excluded_not_fresh")
+    if isinstance(dropped, int) and dropped > 0:
+        print("note: the server withheld %d item(s) as not freshly checked; "
+              "an empty list here means stale, not none\n" % dropped)
     print_bounties(items)
 
 

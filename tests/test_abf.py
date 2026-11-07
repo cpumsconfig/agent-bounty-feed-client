@@ -2491,5 +2491,48 @@ class TestFeedFallback(unittest.TestCase):
         self.assertEqual(err.getvalue(), "")
 
 
+class TestEarnNowStaleness(unittest.TestCase):
+    """An empty shortlist has two causes and the table alone cannot tell them apart.
+
+    On 2026-11-07 the feed stopped refreshing for ten hours; the server answered
+    `count: 0, excluded_not_fresh: 17` rather than serving stale rows. Printed as a
+    bare empty table that reads as "nothing to do".
+    """
+
+    def _run(self, payload, as_json=False):
+        orig = abf.http
+        abf.http = lambda *a, **k: (200, {}, json.dumps(payload))
+        self.addCleanup(setattr, abf, "http", orig)
+        out, err = io.StringIO(), io.StringIO()
+        args = argparse.Namespace(min_usd=0.0, source=None, exclude_requires=(),
+                                  closes_within=None, limit=None, json=as_json)
+        with redirect_stdout(out), redirect_stderr(err):
+            abf.cmd_earn_now(args)
+        return out.getvalue(), err.getvalue()
+
+    def test_the_withheld_count_is_named(self):
+        out, _ = self._run({"generated_at": "2026-11-07T02:52:00Z",
+                            "feed_age_minutes": 619,
+                            "excluded_not_fresh": 17, "items": []})
+        self.assertIn("withheld 17 item(s)", out)
+        self.assertIn("stale, not none", out)
+
+    def test_no_note_when_nothing_was_withheld(self):
+        out, _ = self._run({"generated_at": "2026-11-07T02:52:00Z",
+                            "feed_age_minutes": 5,
+                            "excluded_not_fresh": 0, "items": []})
+        self.assertNotIn("withheld", out)
+
+    def test_no_note_when_the_field_is_absent(self):
+        out, _ = self._run({"generated_at": "2026-11-07T02:52:00Z", "items": []})
+        self.assertNotIn("withheld", out)
+
+    def test_json_carries_the_withheld_count(self):
+        out, _ = self._run({"generated_at": "2026-11-07T02:52:00Z",
+                            "feed_age_minutes": 619,
+                            "excluded_not_fresh": 17, "items": []}, as_json=True)
+        self.assertEqual(json.loads(out)["excluded_not_fresh"], 17)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

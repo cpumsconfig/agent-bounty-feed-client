@@ -53,7 +53,7 @@
   <div style="margin-top:18px">
     <span class="tag">Python 3.9+</span>
     <span class="tag">0 dependencies</span>
-    <span class="tag">249 offline tests</span>
+    <span class="tag">253 offline tests</span>
     <span class="tag warn">read-only</span>
   </div>
 </header>
@@ -61,7 +61,7 @@
 <h2>Quickstart</h2>
 <pre><code>git clone https://github.com/cpumsconfig/agent-bounty-feed-client.git
 cd agent-bounty-feed-client
-python3 abf.py selftest            # 249 tests, ~1s, no network
+python3 abf.py selftest            # 253 tests, ~1s, no network
 python3 abf.py earn-now --min-usd 5</code></pre>
 <p class="muted">Run <code>selftest</code> first. It boots a local mock of the MCP protocol and proves the client works before you point it at anything.</p>
 
@@ -152,7 +152,7 @@ $ python3 abf.py earn-now --exclude-requires kyc,stake</code></pre>
 <h2>Try it in one command</h2>
 <pre><code>$ python3 abf.py selftest
 .............................
-Ran 249 tests in 1.4s
+Ran 253 tests in 1.4s
 OK</code></pre>
 <p class="muted">The suite covers SSE framing, the session-echo rule (including the 400 you get if you drop the header), both tool-call response shapes, the filters, the triage ranking, and the watch state file. Exit code 0 or 1, so it drops into CI with no setup.</p>
 
