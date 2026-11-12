@@ -37,6 +37,8 @@ Run `selftest` first if you want proof the client works before pointing it at an
 
 ### Sample output
 
+Captured 2026-10-31; the board turns over, so the rows will differ when you run it.
+
 ```
 feed generated at 2026-10-31T00:46:42Z (31 min old), filter: est_usd >= 5
 
@@ -153,8 +155,11 @@ required ones before it calls, so you are not guessing:
 
 ```bash
 python3 abf.py mcp --tool get_new_bounties --arguments '{"since":"2026-10-30T00:00:00Z"}'
-python3 abf.py mcp --tool get_bounty --arguments '{"id":"frantic:129"}'
+python3 abf.py mcp --tool get_bounty --arguments '{"id":"frantic:149"}'
 ```
+
+Ids come from `abf.py feed` and expire with their listing, so a hardcoded one here will
+rot. If a `get` comes back "No open bounty with id", that is the reason, not a bug.
 
 Call `get_new_bounties` with no arguments and the client prints
 `get_new_bounties requires: since` instead of leaving you with a server error.
@@ -286,7 +291,7 @@ bounties. `--once` plus cron is the same thing without a long-running process.
 their own commands rather than a `--arguments` JSON blob:
 
 ```bash
-python3 abf.py get frantic:129          # get_bounty
+python3 abf.py get frantic:149          # get_bounty (ids expire; take one from `feed`)
 python3 abf.py new --since 6h           # get_new_bounties; also accepts 2d or an ISO stamp
 ```
 
